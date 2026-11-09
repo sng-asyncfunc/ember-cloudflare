@@ -90,6 +90,8 @@
   --setup-backdrop: linear-gradient(45deg, #fff500, #ff9f00, #f00, #ec0061);
   /* Campfire's scrollbar thumb (base.css), the gray a Mac's are, in both modes. */
   --scrollbar: #c1c1c1;
+  /* What a search matched, marked in its results: a pale yellow, as Slack marks them. */
+  --search-match: #fbe7a1;
   color-scheme: light;
 }
 
@@ -137,6 +139,7 @@
   --code-list: oklch(85.74% 0.133 89.95);
   --code-inserted: oklch(90.72% 0.112 146.34);
   --code-deleted: oklch(92.23% 0.03967766015913856 27.493308249746637);
+  --search-match: #6b5313;
   color-scheme: dark;
 }
 
@@ -392,6 +395,7 @@
   --color-menu-shadow: var(--menu-shadow);
   --color-drag-shadow: var(--drag-shadow);
   --color-tooltip-shadow: var(--tooltip-shadow);
+  --color-search-match: var(--search-match);
   /* Workspace geometry: 80px rail, 280px sidebar (230px `narrow:`), 60px header. */
   --spacing-rail: 80px;
   --spacing-sidebar: var(--sidebar-width);
@@ -504,6 +508,12 @@
     mark {
       background-color: transparent;
       color: inherit;
+    }
+
+    /* But search results mark what the search matched. */
+    mark[data-search-match] {
+      background-color: var(--search-match);
+      border-radius: 2px;
     }
 
     code {

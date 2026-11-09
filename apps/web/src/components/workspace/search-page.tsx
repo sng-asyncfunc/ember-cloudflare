@@ -1,28 +1,77 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { sanitizeSearch, searchPath, type Me, type RoomId, type SearchResults } from "@ember/protocol";
-import { ArrowLeft, ArrowUp, Search, Trash, Xmark } from "@/components/icons/iconoir";
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import {
+  hasFilters,
+  isSearchable,
+  normalizedSearch,
+  SEARCH_FLAGS,
+  searchKey,
+  searchOfQuery,
+  searchPath,
+  type Me,
+  type Room,
+  type RoomId,
+  type Search,
+  type SearchFilters,
+  type SearchFlag,
+  type SearchMatch,
+  type SearchResults,
+  type SearchSort,
+} from "@ember/protocol";
+import { ArrowLeft, ClockRotateRight, NavArrowRight, Search as SearchIcon, Sort, Trash, User as UserIcon, Xmark } from "@/components/icons/iconoir";
 import { MainContent } from "@/components/main-content";
 import { PageLink } from "@/components/page-link";
-import { useNameOf } from "@/hooks/use-directory";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useMounted } from "@/hooks/use-mounted";
-import { navigate, pageMark, SEARCHES_PATH, useQueryParam, useVisit } from "@/hooks/use-route";
+import { navigate, pageMark, permalinkOf, SEARCHES_PATH, useQuery, useVisit } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
-import { clearSearches, fetchSearch, isSignedOut, recordSearch } from "@/lib/api";
-import { toSentence } from "@/lib/directs";
-import { pressedAlone } from "@/lib/keyboard";
+import { clearSearches, fetchSearch, isSignedOut } from "@/lib/api";
+import { dateLabel, dateTimeLabel } from "@/lib/messages";
+import { FLAG_LABELS, marksFor, takeAnswer } from "@/lib/search";
 import { cn } from "@/lib/utils";
-import { ROUND_BUTTON } from "./link-buttons";
 import { MessageItem, type MessageEditors } from "./message-item";
-import { PageHeader } from "./page-header";
-
-/** What the trash can asks before it clears your recent searches. */
-export const CONFIRM_CLEAR_SEARCHES = "Are you sure you want to clear your recent searches?";
+import { HEADER_BUTTON, PageHeader } from "./page-header";
+import { Chip, CHIPS_ROW, CONFIRM_CLEAR_SEARCHES, FLAG_ICONS, OpenSearchContext, RoomMark, searchLabel, SearchLine, useSearchNames, type SearchNames } from "./search-box";
+import { SearchMarks } from "./search-marks";
 
 /** Results can't be edited or replied to, so nothing opens an editor or writes in a composer. */
 const NO_EDITORS: MessageEditors = { open() {}, close() {}, returnFocus() {}, attach() {}, reply() {} };
 
+/** What the sort menu calls each order. */
+const SORT_LABELS: Record<SearchSort, string> = { newest: "Newest first", oldest: "Oldest first" };
+
+/** A `.btn` under the results, 44px tall for fingers. */
+const BUTTON = "inline-flex cursor-pointer items-center justify-center gap-[0.5em] rounded-[9px] border bg-background px-[1.1em] py-[0.5em] font-medium hover:bg-hover touch:min-h-11";
+
+/** What the page shows of a search: the matches loaded so far, the cursor of the next page, and the rooms they're in. */
+interface Found {
+  matches: SearchMatch[];
+  next: number | null;
+  rooms: ReadonlyMap<RoomId, Room>;
+  recent: Search[];
+}
+
+const foundOf = (results: SearchResults): Found => ({
+  matches: results.matches,
+  next: results.next,
+  rooms: new Map(results.rooms.map((room) => [room.id, room])),
+  recent: results.recent,
+});
+
+/** `found` with the next page after it, leaving out any match it has already. */
+function withNextPage(found: Found, results: SearchResults): Found {
+  const shown = new Set(found.matches.map((match) => match.message.id));
+  return {
+    matches: [...found.matches, ...results.matches.filter((match) => !shown.has(match.message.id))],
+    next: results.next,
+    rooms: new Map([...found.rooms, ...results.rooms.map((room) => [room.id, room] as const)]),
+    recent: results.recent,
+  };
+}
+
 interface Props {
   me: Me;
+  /** The rooms the sidebar lists, which the search's filters are named by. */
+  rooms: readonly Room[];
   /** Where Exit search goes: the last room visited, or home. */
   back: string;
   /** Says why a search failed, as the workspace's alerts do. */
@@ -30,45 +79,42 @@ interface Props {
 }
 
 /**
- * The search page, at `/searches?q=`: what was searched for and how many messages it found in the top
- * bar, your recent searches, then the messages it found, scrolled to the newest, as messages that can't
- * be changed, each naming its room, and the search field where the composer would be. Searching records
- * the search as your newest and goes to its address, and Escape goes to `/searches`, as the field's ×
- * does. Each visit asks for its address's search afresh, but the one a search goes to, which shows what
- * the search answered. Until a visit's search answers, the page, its field too, goes on showing the last
- * one, marked busy, and drops it if the search fails. What the person types in the field meanwhile stays
- * there.
+ * The search results page, at `/searches?q=`, after Slack's: the search in the top bar, which opens the
+ * search box to change it, its filters under it, which turn on and off as the box's chips do, and how
+ * the results are sorted, then how many messages it found, and each, newest first or oldest, as a card
+ * naming its room and day, with the words it matched marked, and Show more under them while there are
+ * more. A page without a search lists your recent searches. Each visit asks for its address's search
+ * afresh, but the one the search box goes to, which shows what its search answered. Until a visit's
+ * search answers, the page goes on showing the last one, marked busy, and drops it if the search fails.
  */
-export function SearchPage({ me, back, onFailed }: Props) {
-  const q = useQueryParam("q");
+export function SearchPage({ me, rooms, back, onFailed }: Props) {
+  const query = useQuery();
   const visit = useVisit();
-  // The page as last drawn: the visit and address's search it was drawn for, what that search found, or
-  // null if it failed, and the visit its field was drawn afresh for.
-  const [page, setPage] = useState<{ visit: number; q: string | null; results: SearchResults | null; field: number } | null>(null);
-  // The visit the person last typed in the field during, before that visit's search had answered.
-  const typedDuring = useRef<number | null>(null);
-  // What the form's last search answered, and the visit it went on to, once that has shown it.
-  const answered = useRef<{ query: string; results: SearchResults; visit?: number } | null>(null);
-  const [searching, setSearching] = useState(false);
-  const list = useRef<HTMLElement>(null);
+  const { search, sort, cursor } = useMemo(() => searchOfQuery(new URLSearchParams(query)), [query]);
+  const names = useSearchNames(me, rooms);
+  const openSearch = useContext(OpenSearchContext);
   const mounted = useMounted();
-  const nameOf = useNameOf();
+  // The page as last drawn: the visit it was drawn for, and what that visit's search found, or null if it failed.
+  const [page, setPage] = useState<{ visit: number; found: Found | null } | null>(null);
+  // The page whose next page is loading.
+  const [loadingMore, setLoadingMore] = useState<typeof page>(null);
+  const list = useRef<HTMLElement>(null);
+  // What takes focus once the search box's search shows: the count of what it found, or what says it found nothing.
+  const heading = useRef<HTMLHeadingElement>(null);
+  const focusOnDraw = useRef(false);
   useTitle("Search");
 
   useEffect(() => {
-    // Draws what this visit's search found, and its field afresh, but for one the person has typed in since the visit began.
-    const draw = (results: SearchResults | null) =>
-      setPage((last) => ({ visit, q, results, field: typedDuring.current === visit ? (last?.field ?? visit) : visit }));
-    const answer = answered.current;
-    if (answer?.query === q && (answer.visit ?? visit) === visit) {
-      answer.visit = visit;
-      draw(answer.results);
+    const draw = (results: SearchResults | null) => setPage({ visit, found: results && foundOf(results) });
+    const answer = cursor === null ? takeAnswer(search, sort, visit) : null;
+    if (answer) {
+      focusOnDraw.current = true;
+      draw(answer);
       return;
     }
-    answered.current = null;
     let stopped = false;
-    fetchSearch(q).then(
-      (found) => !stopped && draw(found),
+    fetchSearch(search, sort, cursor ?? undefined).then(
+      (results) => !stopped && draw(results),
       (error: unknown) => {
         if (stopped && !isSignedOut(error)) return;
         // What another search found doesn't stay at this one's address.
@@ -77,40 +123,42 @@ export function SearchPage({ me, back, onFailed }: Props) {
       },
     );
     return () => void (stopped = true);
-  }, [q, visit, onFailed]);
+  }, [search, sort, cursor, visit, onFailed]);
   const busy = page?.visit !== visit;
-  const results = page?.results ?? null;
-  // The field holds the search the page was drawn for, or the address's until it's drawn.
-  const drawn = page ?? { q, field: visit };
+  const found = page?.found ?? null;
 
-  // The newest message shows, at the bottom.
+  // A search drawn afresh shows from its top, and the box's takes focus. The next page joins the one
+  // drawn, which stays where it's scrolled to.
+  const drawn = page?.visit;
   useLayoutEffect(() => {
-    if (list.current) list.current.scrollTop = list.current.scrollHeight;
-  }, [results]);
+    if (list.current) list.current.scrollTop = 0;
+    if (!focusOnDraw.current || drawn !== visit) return;
+    focusOnDraw.current = false;
+    heading.current?.focus({ preventScroll: true });
+  }, [drawn, visit]);
 
-  // A DM is named after everyone in it, you too.
-  const roomNames = useMemo(
-    () => new Map<RoomId, string>(results?.rooms.map((room) => [room.id, room.kind === "direct" ? toSentence(room.members.map(nameOf)) : room.name])),
-    [results, nameOf],
-  );
+  // Each filter turned on or off goes to the search it makes, as does each order.
+  const go = (next: Search, nextSort: SearchSort = sort) => navigate(searchPath(normalizedSearch(next), nextSort));
+  const without = (filter: keyof SearchFilters) => go({ ...search, [filter]: undefined });
+  const toggle = (flag: SearchFlag) => (search[flag] ? without(flag) : go({ ...search, [flag]: true }));
 
-  const search = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const typed = String(new FormData(event.currentTarget).get("q"));
-    const mark = pageMark();
-    setSearching(true);
-    recordSearch(typed)
-      .then(
-        (found) => {
-          // A page the person has gone to meanwhile stays.
-          if (!mounted.current || pageMark() !== mark) return;
-          const query = sanitizeSearch(typed);
-          answered.current = { query, results: found };
-          navigate(searchPath(query));
-        },
-        (error: unknown) => (mounted.current || isSignedOut(error)) && onFailed(error),
-      )
-      .finally(() => mounted.current && setSearching(false));
+  // The next page joins the page it's for, unless another search has shown meanwhile.
+  const showMore = () => {
+    const shown = page;
+    if (busy || !shown?.found || shown.found.next === null || loadingMore === shown) return;
+    const loaded = () => setLoadingMore((loading) => (loading === shown ? null : loading));
+    setLoadingMore(shown);
+    fetchSearch(search, sort, shown.found.next).then(
+      (results) => {
+        if (!mounted.current) return;
+        loaded();
+        setPage((page) => (page === shown && page.found ? { ...page, found: withNextPage(page.found, results) } : page));
+      },
+      (error: unknown) => {
+        if (mounted.current) loaded();
+        if (mounted.current || isSignedOut(error)) onFailed(error);
+      },
+    );
   };
 
   // Asked first, then the page without a search.
@@ -123,147 +171,237 @@ export function SearchPage({ me, back, onFailed }: Props) {
     );
   };
 
-  // Escape follows the field's ×.
-  const cancel = (event: KeyboardEvent) => pressedAlone(event.nativeEvent, "Escape") && navigate(SEARCHES_PATH);
-
-  const messages = results?.messages ?? [];
+  const searchable = isSearchable(search);
+  // What the top bar shows of the search, if there's anything to show.
+  const shown = search.q !== "" || hasFilters(search);
+  const fromMe = search.from === me.id;
+  const roomIn = search.in === undefined ? null : names.room(search.in);
   return (
     <>
       <PageHeader>
-        <h1 className="flex min-w-0 flex-1 items-center text-[17px] leading-[1.4] font-[650] max-md:text-base">Search messages</h1>
-        {results?.query != null && <SearchedFor query={results.query} count={messages.length} />}
+        <PageLink href={back} title="Exit search" className={HEADER_BUTTON}>
+          <ArrowLeft className="size-5" />
+          <span className="sr-only">Exit search</span>
+        </PageLink>
+        <h1 className="sr-only">Search messages</h1>
+        {/* The search, which opens the search box to change it. */}
+        <button
+          type="button"
+          aria-label={shown ? `Change search: ${searchLabel(search, names)}` : undefined}
+          onClick={(event) => openSearch({ opener: event.currentTarget, search, sort })}
+          className="flex min-h-9 max-w-[640px] min-w-0 flex-1 cursor-text items-center gap-2 rounded-[9px] border bg-surface px-3 text-start text-[15px] hover:border-muted-foreground touch:min-h-11"
+        >
+          <SearchIcon className="size-[18px] shrink-0 text-muted-foreground" />
+          {shown ? (
+            <SearchLine search={search} names={names} />
+          ) : (
+            <span className="text-muted-foreground">Search</span>
+          )}
+        </button>
       </PageHeader>
       <MainContent
         aria-busy={busy || undefined}
         className="relative flex min-h-0 min-w-0 flex-col bg-background pr-[env(safe-area-inset-right)] max-md:pl-[env(safe-area-inset-left)]"
       >
-        {results && results.recent.length > 0 && <RecentSearches searches={results.recent} onClear={clear} />}
-        {messages.length > 0 ? (
-          // The results, which scroll between the recent searches and the field.
-          <section
-            ref={list}
-            aria-label="Search results"
-            className="min-h-0 flex-1 basis-0 overflow-x-hidden overflow-y-auto overscroll-contain pt-5 pb-[18px] [scrollbar-gutter:stable] max-md:pt-[18px] max-md:pb-3"
-          >
-            {/* Each on its own, with no grouping or day separators, as search_results_controller.js formats them. */}
-            {messages.map((message) => (
-              <MessageItem key={message.id} message={message} me={me} threaded={false} editing={false} actions={null} editors={NO_EDITORS} roomName={roomNames.get(message.roomId)} />
-            ))}
-          </section>
-        ) : results ? (
-          <NoResults searched={results.query !== null} />
-        ) : (
-          <div className="flex-1" />
+        {searchable && (
+          // The filters, and the order, at the end.
+          <div className="flex flex-none items-start gap-2 border-b px-[22px] py-2.5 max-md:items-center max-md:px-3">
+            <div role="group" aria-label="Search filters" className={cn("flex min-w-0 flex-1 gap-2", CHIPS_ROW, "max-md:pl-0")}>
+              {search.in !== undefined && (
+                <ScopeChip label={`in:${roomIn ? names.roomName(roomIn) : "an unknown room"}`} onRemove={() => without("in")}>
+                  <RoomMark room={roomIn} size={16} />
+                </ScopeChip>
+              )}
+              {search.from !== undefined && !fromMe && (
+                <ScopeChip label={`from:${names.person(search.from)}`} onRemove={() => without("from")}>
+                  <UserIcon />
+                </ScopeChip>
+              )}
+              <Chip pressed={fromMe} onClick={() => (fromMe ? without("from") : go({ ...search, from: me.id }))}>
+                <UserIcon />
+                From me
+              </Chip>
+              {SEARCH_FLAGS.map(({ flag }) => {
+                const Icon = FLAG_ICONS[flag];
+                return (
+                  <Chip key={flag} pressed={search[flag] === true} onClick={() => toggle(flag)}>
+                    <Icon />
+                    {FLAG_LABELS[flag]}
+                  </Chip>
+                );
+              })}
+            </div>
+            <SortMenu sort={sort} onSort={(order) => go(search, order)} />
+          </div>
         )}
 
-        {/* The search footer, clear of a phone's home indicator, as the composer is. */}
-        <footer className="flex flex-none items-center gap-[1ch] border-t bg-background px-[22px] pt-3 pb-[max(12px,env(safe-area-inset-bottom))] max-md:gap-[5px] max-md:px-2.5 max-md:pt-2.5 max-md:pb-[max(10px,env(safe-area-inset-bottom))]">
-          <PageLink href={back} className="grid size-9 shrink-0 place-items-center rounded-[0.5em] border bg-background touch:size-11">
-            <ArrowLeft className="size-[1.3em]" />
-            <span className="sr-only">Exit search</span>
-          </PageLink>
-          <form onSubmit={search} onKeyDown={cancel} aria-busy={searching || undefined} className="flex min-w-0 flex-1 items-center [contain:inline-size]">
-            {/* Campfire's `.input--actor`: the field's border holds the hint, the field, its × and the button. */}
-            <div className="flex min-h-11 w-full min-w-0 items-center gap-[1ch] rounded-[9px] border px-[0.8em] py-[0.5em] text-base focus-within:border-muted-foreground max-md:px-2">
-              <Search className="size-5 shrink-0 max-md:hidden" />
-              {/* Afresh with each search drawn, holding it, and focused, but for one typed in while it loaded. It takes
-                  taps from the top of its box to the bottom. */}
-              <input
-                key={drawn.field}
-                name="q"
-                type="text"
-                role="searchbox"
-                aria-label="search"
-                placeholder="Search messages…"
-                required
-                autoFocus
-                defaultValue={drawn.q ?? ""}
-                onChange={() => {
-                  if (busy) typedDuring.current = visit;
-                }}
-                className="peer -my-[0.5em] min-w-0 flex-1 self-stretch bg-transparent py-[0.5em] placeholder:text-muted-foreground focus-visible:outline-none"
-              />
-              {/* Hidden while the field is empty, as Campfire's `.searches__input:required:invalid ~ .searches__reset` is,
-                  and 44px for fingers, as the button beside it is. */}
-              <PageLink href={SEARCHES_PATH} role="button" className="grid shrink-0 place-items-center peer-invalid:hidden touch:-my-[0.4em] touch:size-11">
-                <Xmark className="size-5" />
-                <span className="sr-only">Clear search field</span>
-              </PageLink>
-              <button
-                type="submit"
-                disabled={searching}
-                className={cn(
-                  "-my-[0.4em] -mr-[0.7em] grid size-9 shrink-0 cursor-pointer place-items-center rounded-[0.5em] bg-foreground text-[0.8rem] text-background hover:not-active:brightness-70 touch:size-11",
-                  "disabled:pointer-events-none disabled:opacity-50 disabled:grayscale disabled:contrast-50",
-                )}
-              >
-                <ArrowUp className="size-[1.3em]" />
-                <span className="sr-only">Search</span>
-              </button>
-            </div>
-          </form>
-        </footer>
+        <section
+          ref={list}
+          aria-label="Search results"
+          className="min-h-0 flex-1 basis-0 overflow-x-hidden overflow-y-auto overscroll-contain px-[22px] pt-4 pb-[max(18px,env(safe-area-inset-bottom))] [scrollbar-gutter:stable] max-md:px-3 max-md:pt-3"
+        >
+          {/* A page can lose every match it found to messages deleted since, and still have one after it. */}
+          {found && (found.matches.length > 0 || found.next !== null) ? (
+            <>
+              <h2 ref={heading} tabIndex={-1} className="mb-3 text-[13px] font-semibold text-muted-foreground outline-none">
+                {countLabel(found)}
+              </h2>
+              <ol className="flex flex-col gap-3">
+                {found.matches.map((match) => (
+                  <li key={match.message.id}>
+                    <Result match={match} room={found.rooms.get(match.message.roomId) ?? names.room(match.message.roomId)} me={me} names={names} />
+                  </li>
+                ))}
+              </ol>
+              {found.next !== null && (
+                <div className="flex justify-center pt-4">
+                  <button type="button" onClick={showMore} aria-busy={loadingMore === page || undefined} className={BUTTON}>
+                    {loadingMore === page ? "Loading…" : "Show more"}
+                  </button>
+                </div>
+              )}
+            </>
+          ) : found && searchable ? (
+            <Nothing heading={heading} title="No messages found">
+              {hasFilters(search) ? "Try different words, or take a filter off." : "Try a different word or phrase."}
+            </Nothing>
+          ) : found ? (
+            <>
+              <Nothing heading={heading} title="Find a conversation">
+                Search messages across your rooms and direct messages.
+                <button type="button" onClick={(event) => openSearch({ opener: event.currentTarget })} className={`${BUTTON} mt-4 text-foreground`}>
+                  <SearchIcon className="size-[18px]" />
+                  Search
+                </button>
+              </Nothing>
+              {found.recent.length > 0 && <RecentSearches searches={found.recent} names={names} onClear={clear} />}
+            </>
+          ) : null}
+        </section>
       </MainContent>
     </>
   );
 }
 
-/**
- * What was searched for: the search, in quotes and cut short first, and how many messages it found, at
- * most 40% of the top bar, as plain text.
- */
-function SearchedFor({ query, count }: { query: string; count: number }) {
+/** The room or person a search is narrowed to, as a pressed chip, which takes the filter off. */
+function ScopeChip({ label, onRemove, children }: { label: string; onRemove: () => void; children: ReactNode }) {
   return (
-    <div className="flex max-w-[40%] min-w-0 items-center gap-[1ch] rounded-lg border border-transparent px-[1.1em] py-[0.5em] font-medium whitespace-nowrap">
-      <span className="truncate">“{query}”</span>
-      <span className="shrink-0">{count}</span>
-    </div>
+    <Chip pressed aria-label={`Remove ${label}`} onClick={onRemove}>
+      {children}
+      <span className="max-w-[16em] truncate">{label}</span>
+      <Xmark />
+    </Chip>
+  );
+}
+
+/** How many messages the page shows, with a + while there are more. */
+function countLabel({ matches, next }: Found): string {
+  const count = matches.length.toLocaleString();
+  if (next !== null) return `${count}+ results`;
+  return matches.length === 1 ? "1 result" : `${count} results`;
+}
+
+/** Newest first or oldest first, as a menu of the two. */
+function SortMenu({ sort, onSort }: { sort: SearchSort; onSort: (sort: SearchSort) => void }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label={`Sort: ${SORT_LABELS[sort]}`}
+        className="inline-flex min-h-8 shrink-0 cursor-pointer items-center justify-center gap-1.5 rounded-full border px-3 text-[13px] font-medium whitespace-nowrap hover:bg-hover touch:min-h-11 touch:min-w-11 aria-expanded:bg-hover"
+      >
+        <Sort className="size-4 shrink-0" />
+        <span className="max-md:sr-only">{SORT_LABELS[sort]}</span>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuRadioGroup value={sort} onValueChange={(value) => onSort(value === "oldest" ? "oldest" : "newest")}>
+          <DropdownMenuRadioItem value="newest">{SORT_LABELS.newest}</DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="oldest">{SORT_LABELS.oldest}</DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
 /**
- * Recent searches, after Campfire's `.searches__recents` (sidebar.css): a row of your recent searches,
- * newest first, each at most 20 characters wide and spread across the row, that scrolls sideways under a
- * fading left edge, then the trash can, which clears them.
+ * A message the search found, as a card, after Slack's: its room's icon and name, and the day it was
+ * written, over the message, which can't be changed, with the words the search matched marked, and a
+ * link to the message where it is.
  */
-function RecentSearches({ searches, onClear }: { searches: string[]; onClear: () => void }) {
+function Result({ match, room, me, names }: { match: SearchMatch; room: Room | null; me: Me; names: SearchNames }) {
+  const { message } = match;
+  const marks = useMemo(() => marksFor(match.words), [match.words]);
+  const created = new Date(message.createdAt);
   return (
-    <div
-      role="group"
-      aria-label="Recent searches"
-      className="flex flex-none items-center gap-[1ch] overflow-x-auto px-4 py-2 [mask-image:linear-gradient(to_left,#000_97%,transparent_99%)]"
-    >
-      {searches.map((search) => (
+    <div className="overflow-hidden rounded-xl border bg-background">
+      <div className="flex min-h-9 items-center gap-2 border-b bg-surface px-4 py-1.5 text-[13px] text-muted-foreground max-md:px-3">
+        <RoomMark room={room} size={15} />
+        <span className="min-w-0 truncate font-semibold text-foreground">{room ? names.roomName(room) : "A room you’ve left"}</span>
+        <span aria-hidden>·</span>
+        <time dateTime={message.createdAt} title={dateTimeLabel(created)} className="shrink-0">
+          {dateLabel(created)}
+        </time>
         <PageLink
-          key={search}
-          href={searchPath(search)}
-          className="mr-auto inline-flex max-w-[20ch] items-center rounded-[9px] border bg-background px-[1.1em] py-[0.5em] font-medium whitespace-nowrap first:ml-[1ch] touch:min-h-11"
+          href={permalinkOf(message)}
+          className="ml-auto inline-flex shrink-0 items-center justify-center gap-0.5 rounded-md px-1.5 py-0.5 font-medium hover:bg-hover hover:text-foreground touch:min-h-11 touch:min-w-11"
         >
-          <span className="truncate">“{search}”</span>
+          {/* Only its arrow at 900px and below, leaving the room's name the room. */}
+          <span className="max-md:sr-only">{room?.kind === "direct" ? "View in conversation" : "View in room"}</span>
+          <NavArrowRight className="size-4" />
         </PageLink>
-      ))}
-      <button type="button" onClick={onClear} className={cn(ROUND_BUTTON, "mr-[2ch]")}>
-        <Trash className="size-[1.3em]" />
-        <span className="sr-only">Clear recent searches</span>
-      </button>
-    </div>
-  );
-}
-
-/**
- * Campfire's `.message-area--empty`, centred where the results would be: a magnifying glass, faded, over
- * what to do, which tells a search that found nothing from no search at all.
- */
-function NoResults({ searched }: { searched: boolean }) {
-  return (
-    <div className="grid min-h-0 flex-1 content-center justify-items-center">
-      <div className="min-w-0 p-6 text-center text-muted-foreground">
-        <figure className="px-[1ch] py-4">
-          <Search className="mx-auto h-auto w-16 max-w-[25vw] text-foreground opacity-20" />
-        </figure>
-        <h2 className="mb-1.5 text-xl font-bold text-foreground">{searched ? "No messages found" : "Find a conversation"}</h2>
-        <p>{searched ? "Try a different word or phrase." : "Search messages across your rooms and direct messages."}</p>
+      </div>
+      <div className="pb-1">
+        <SearchMarks value={marks}>
+          <MessageItem message={message} me={me} threaded={false} editing={false} actions={null} editors={NO_EDITORS} />
+        </SearchMarks>
       </div>
     </div>
+  );
+}
+
+/**
+ * Campfire's `.message-area--empty`: a magnifying glass, faded, over what to do, which tells a search
+ * that found nothing from no search at all.
+ */
+function Nothing({ heading, title, children }: { heading: RefObject<HTMLHeadingElement | null>; title: string; children: ReactNode }) {
+  return (
+    <div className="grid justify-items-center px-6 pt-[8dvh] pb-6 text-center text-muted-foreground">
+      <SearchIcon className="mb-4 h-auto w-16 max-w-[25vw] text-foreground opacity-20" />
+      <h2 ref={heading} tabIndex={-1} className="mb-1.5 text-xl font-bold text-foreground outline-none">
+        {title}
+      </h2>
+      <p className="grid justify-items-center">{children}</p>
+    </div>
+  );
+}
+
+/** Your recent searches, newest first, each going to its results, then the trash can, which clears them. */
+function RecentSearches({ searches, names, onClear }: { searches: Search[]; names: SearchNames; onClear: () => void }) {
+  return (
+    <section aria-labelledby="recent-searches" className="mx-auto w-full max-w-[640px] pt-6">
+      <div className="flex items-center justify-between gap-2 px-2 pb-1">
+        <h2 id="recent-searches" className="text-xs font-semibold text-muted-foreground">
+          Recent searches
+        </h2>
+        <button
+          type="button"
+          aria-label="Clear recent searches"
+          onClick={onClear}
+          className="inline-flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-hover hover:text-foreground touch:min-h-11"
+        >
+          <Trash className="size-3.5" />
+          Clear
+        </button>
+      </div>
+      <ul>
+        {searches.map((search) => (
+          <li key={searchKey(search)}>
+            <PageLink href={searchPath(search)} aria-label={searchLabel(search, names)} className="flex min-h-10 items-center gap-2.5 rounded-lg px-2 py-1.5 text-[14px] text-foreground hover:bg-hover touch:min-h-11">
+              <ClockRotateRight className="size-[18px] shrink-0 text-muted-foreground" />
+              <SearchLine search={search} names={names} />
+            </PageLink>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }

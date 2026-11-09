@@ -12,11 +12,18 @@ import {
   type Sidebar,
 } from "@ember/protocol";
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import worker from "../src/index";
 import { verifyPassword } from "../src/passwords";
-import { NO_SETUP_TOKEN, SETUP_LINK_NEEDED, SETUP_LINK_REFUSED } from "../src/setup";
+import {
+  NO_SETUP_PASSWORD,
+  SETUP_LINK_NEEDED,
+  SETUP_LINK_REFUSED,
+  SETUP_PASSWORD_NEEDED,
+  SETUP_PASSWORD_REFUSED,
+  SETUP_TRIES_LIMITED,
+} from "../src/setup";
 import { api, apiWith, builtPages, cookieOf, freshDeploy, listedRoom, origin, SETUP_TOKEN, signIn, workspaceSql, workspaceStub } from "./support";
 
 const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "12345678" };
@@ -45,7 +52,7 @@ describe("Set up the workspace", () => {
       turnstileSiteKey: null,
       passwordResetCodes: false,
       account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {} },
-      version: "0.1",
+      version: "0.4.2",
       // The suite's key pair's public key, uncompressed, without padding.
       vapidPublicKey: "BEYXTBB5_jNhNzXDmx5KEU55Vbbd-u--Lk9rM5OFQvUkPIBwZJ9QzAq0zdEzFw6yTV8cTriz_qYBVicY02_VxTQ",
       // What the useragent gem reads without a user agent, which it takes as "Mozilla/4.0 (compatible)".
@@ -216,23 +223,43 @@ describe("Set up the workspace", () => {
   });
 });
 
-/**
- * A first-run post as the Set up Ember page sends it to `url`, with `token` as its bearer token, or none,
- * to a Worker whose EMBER_SETUP_TOKEN is `secret`, or unset.
- */
-function firstRunAt(url: string, { token, secret, body = JSON.stringify(ada) }: { token?: string; secret: string | undefined; body?: string }) {
-  const headers = new Headers({ "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json" });
+/** The setup password these tests give a deployment, as Deploy to Cloudflare's form asks the deployer to make one up. */
+const SETUP_PASSWORD = "correct horse battery staple";
+
+/** A setup password as the page sends it, percent-encoded, since a header can't hold every character a password can. */
+const encoded = (password: string) => encodeURIComponent(password);
+
+/** A post to setup as the Set up Ember page sends it, to a Worker with the given setup secrets in place of the suite's. */
+interface SetupPost {
+  /** The post's bearer token, or none. */
+  token?: string;
+  /** The IP address it comes from, as Cloudflare's `CF-Connecting-IP` says. */
+  ip?: string;
+  /** The Worker's EMBER_SETUP_TOKEN, or unset. */
+  secret: string | undefined;
+  /** The Worker's EMBER_SETUP_PASSWORD, or unset. */
+  password?: string;
+  body?: string;
+}
+
+/** A first-run post to `url`, as `SetupPost` describes it. */
+function firstRunAt(url: string, { token, ip = "203.0.113.7", secret, password, body = JSON.stringify(ada) }: SetupPost) {
+  const headers = new Headers({ "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json", "CF-Connecting-IP": ip });
   if (token !== undefined) headers.set("Authorization", `Bearer ${token}`);
   const request = new Request<unknown, IncomingRequestCfProperties>(url, { method: "POST", headers, body });
-  return worker.fetch(request, { ...(env as unknown as Env), EMBER_SETUP_TOKEN: secret });
+  return worker.fetch(request, { ...(env as unknown as Env), EMBER_SETUP_TOKEN: secret, EMBER_SETUP_PASSWORD: password });
 }
 
 /** The same, to this suite's Worker, whose setup token is `SETUP_TOKEN` unless `secret` says otherwise. */
-const firstRunWith = (options: { token?: string; secret?: string; body?: string }) => firstRunAt(`${origin}/api/first_run`, { secret: SETUP_TOKEN, ...options });
+const firstRunWith = (options: Partial<SetupPost>) => firstRunAt(`${origin}/api/first_run`, { secret: SETUP_TOKEN, ...options });
 
-/** What setting Ember up takes, as `/api/bootstrap` at `url` tells a Worker whose EMBER_SETUP_TOKEN is `secret`. */
-async function setupAccessAt(url: string, secret: string | undefined): Promise<Bootstrap["setupAccess"]> {
-  const response = await worker.fetch(new Request<unknown, IncomingRequestCfProperties>(`${url}/api/bootstrap`), { ...(env as unknown as Env), EMBER_SETUP_TOKEN: secret });
+/** What setting Ember up takes, as `/api/bootstrap` at `url` tells a Worker whose EMBER_SETUP_TOKEN is `secret` and EMBER_SETUP_PASSWORD `password`. */
+async function setupAccessAt(url: string, secret: string | undefined, password?: string): Promise<Bootstrap["setupAccess"]> {
+  const response = await worker.fetch(new Request<unknown, IncomingRequestCfProperties>(`${url}/api/bootstrap`), {
+    ...(env as unknown as Env),
+    EMBER_SETUP_TOKEN: secret,
+    EMBER_SETUP_PASSWORD: password,
+  });
   return ((await response.json()) as Bootstrap).setupAccess;
 }
 
@@ -258,14 +285,22 @@ describe("Installer-protected setup link", () => {
   });
 
   it("refuses a token that isn't this deployment's, however close, and asks for the link given none", async () => {
-    for (const token of [`${SETUP_TOKEN.slice(0, -1)}f`, SETUP_TOKEN.toUpperCase(), ` ${SETUP_TOKEN}`, "0".repeat(64)]) {
+    for (const token of [`${SETUP_TOKEN.slice(0, -1)}f`, SETUP_TOKEN.toUpperCase(), `${SETUP_TOKEN}0`, "0".repeat(64)]) {
       const response = await firstRunWith({ token });
       expect(response.status, token).toBe(403);
       expect(await response.json()).toEqual({ error: SETUP_LINK_REFUSED });
     }
-    const blank = await firstRunWith({ token: "" });
-    expect([blank.status, await blank.json()]).toEqual([403, { error: SETUP_LINK_NEEDED }]);
+    for (const token of ["", " "]) {
+      const blank = await firstRunWith({ token });
+      expect([blank.status, await blank.json()]).toEqual([403, { error: SETUP_LINK_NEEDED }]);
+    }
     await nothingCreated();
+  });
+
+  it("ignores the spaces and line breaks around the deployment's token that pasting it can bring along", async () => {
+    const secret = ` ${SETUP_TOKEN}\n`;
+    expect(await setupAccessAt(origin, secret)).toBe("link");
+    expect((await firstRunWith({ secret, token: SETUP_TOKEN })).status).toBe(201);
   });
 
   it("checks the link before whether Ember is set up, so without it setup says nothing more", async () => {
@@ -274,36 +309,151 @@ describe("Installer-protected setup link", () => {
     expect((await firstRunWith({ token: SETUP_TOKEN })).status).toBe(409);
   });
 
-  it("is closed, and says so, while the deployment has no setup token, or a blank one", async () => {
-    for (const secret of [undefined, ""]) {
-      expect(await setupAccessAt(origin, secret), String(secret)).toBe("closed");
-      const response = await firstRunWith({ secret, token: SETUP_TOKEN });
-      expect(response.status).toBe(403);
-      expect(await response.json()).toEqual({ error: NO_SETUP_TOKEN });
+  it("is closed, and says so, while the deployment has neither a setup password nor a token, or only blank ones", async () => {
+    for (const [secret, password] of [[undefined, undefined], ["", ""], [" \n", "  "]] as const) {
+      const secrets = JSON.stringify([secret, password]);
+      expect(await setupAccessAt(origin, secret, password), secrets).toBe("closed");
+      const response = await firstRunWith({ secret, password, token: SETUP_TOKEN });
+      expect([response.status, await response.json()], secrets).toEqual([403, { error: NO_SETUP_PASSWORD }]);
     }
     await nothingCreated();
   });
 
-  it("counts a token that can't be one as none, and says so in the log, without repeating it", async () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const secret = "Hunter2".repeat(10);
-    expect(await setupAccessAt(origin, secret)).toBe("closed");
-    expect(error).not.toHaveBeenCalled();
-    const response = await firstRunWith({ secret, token: secret });
-    expect([response.status, await response.json()]).toEqual([403, { error: NO_SETUP_TOKEN }]);
-    expect(error).toHaveBeenCalledWith(expect.stringContaining("64 lowercase hex characters"));
-    expect(error.mock.calls.flat().join(" ")).not.toContain(secret);
-    error.mockRestore();
-  });
-
-  it("is open over loopback without a token, where `wrangler dev` serves, and still takes the link there with one", async () => {
+  it("is open over loopback without either, where `wrangler dev` serves, and still asks for them there with one", async () => {
     const local = "http://localhost:8787";
     expect(await setupAccessAt(local, undefined)).toBe("open");
     expect(await setupAccessAt(local, SETUP_TOKEN)).toBe("link");
+    expect(await setupAccessAt(local, undefined, SETUP_PASSWORD)).toBe("password");
     expect((await firstRunAt(`${local}/api/first_run`, { secret: SETUP_TOKEN })).status).toBe(403);
+    expect((await firstRunAt(`${local}/api/first_run`, { secret: undefined, password: SETUP_PASSWORD })).status).toBe(403);
     const created = await firstRunAt(`${local}/api/first_run`, { secret: undefined });
     expect(created.status).toBe(201);
     expect(await workspaceSql("SELECT name FROM users")).toEqual([{ name: "Ada Lovelace" }]);
+  });
+});
+
+/** A post to setup's `path` on a Worker with `SETUP_PASSWORD` as its setup password and no setup token, as Deploy to Cloudflare's form makes it. */
+const withPassword = (path: string, options: Omit<Partial<SetupPost>, "secret"> = {}) => firstRunAt(`${origin}${path}`, { secret: undefined, password: SETUP_PASSWORD, ...options });
+
+describe("Setup password from the deploy form", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("sets Ember up only with the setup password the deploy form asked for: without it the form is refused before it's read", async () => {
+    expect(await setupAccessAt(origin, undefined, SETUP_PASSWORD)).toBe("password");
+    for (const body of [JSON.stringify(ada), "not a form"]) {
+      const refused = await withPassword("/api/first_run", { body });
+      expect([refused.status, await refused.json()]).toEqual([403, { error: SETUP_PASSWORD_NEEDED }]);
+      expect(refused.headers.get("Set-Cookie")).toBeNull();
+    }
+    await nothingCreated();
+
+    const created = await withPassword("/api/first_run", { token: encoded(SETUP_PASSWORD) });
+    expect(created.status).toBe(201);
+    expect(cookieOf(created)).toMatch(/^__Host-session_token=/);
+    expect(await workspaceSql("SELECT name, role FROM users")).toEqual([{ name: "Ada Lovelace", role: 1 }]);
+  });
+
+  it("says whether a setup password is right before the rest of the form is filled in, setting nothing up", async () => {
+    const right = await withPassword("/api/first_run/check", { token: encoded(SETUP_PASSWORD) });
+    expect(right.status).toBe(204);
+    expect(right.headers.get("Set-Cookie")).toBeNull();
+    const wrong = await withPassword("/api/first_run/check", { token: encoded("correct horse battery stapler") });
+    expect([wrong.status, await wrong.json()]).toEqual([403, { error: SETUP_PASSWORD_REFUSED }]);
+    const none = await withPassword("/api/first_run/check");
+    expect([none.status, await none.json()]).toEqual([403, { error: SETUP_PASSWORD_NEEDED }]);
+    await nothingCreated();
+
+    // Open over loopback, with nothing to check.
+    expect((await firstRunAt("http://localhost:8787/api/first_run/check", { secret: undefined })).status).toBe(204);
+    // A setup link opens it as the form would.
+    expect((await firstRunAt(`${origin}/api/first_run/check`, { secret: SETUP_TOKEN, token: SETUP_TOKEN })).status).toBe(204);
+    expect((await firstRunAt(`${origin}/api/first_run/check`, { secret: SETUP_TOKEN, token: "0".repeat(64) })).status).toBe(403);
+  });
+
+  it("checks the setup password before whether Ember is set up, then sends someone with it home", async () => {
+    expect((await withPassword("/api/first_run", { token: encoded(SETUP_PASSWORD) })).status).toBe(201);
+    for (const path of ["/api/first_run/check", "/api/first_run"]) {
+      expect((await withPassword(path, { token: encoded("not the password") })).status, path).toBe(403);
+      const again = await withPassword(path, { token: encoded(SETUP_PASSWORD) });
+      expect([again.status, await again.json()], path).toEqual([409, { error: "Ember is already set up", redirect: "/" }]);
+    }
+    expect(await count("users")).toBe(1);
+  });
+
+  it("refuses a password that isn't the deployment's, however close, and ignores the spaces around either", async () => {
+    for (const password of [SETUP_PASSWORD.toUpperCase(), SETUP_PASSWORD.slice(0, -1), `${SETUP_PASSWORD}!`, SETUP_PASSWORD.replaceAll(" ", "")]) {
+      const response = await withPassword("/api/first_run", { token: encoded(password) });
+      expect([response.status, await response.json()], password).toEqual([403, { error: SETUP_PASSWORD_REFUSED }]);
+    }
+    await nothingCreated();
+
+    const pasted = ` ${SETUP_PASSWORD}\n`;
+    expect(await setupAccessAt(origin, undefined, pasted)).toBe("password");
+    expect((await withPassword("/api/first_run", { password: pasted, token: encoded(`  ${SETUP_PASSWORD} `) })).status).toBe(201);
+  });
+
+  it("takes a setup password of any characters, as the page encodes it, or as it comes where it isn't encoded", async () => {
+    const password = 'Pässwört "🔥" 100% / ü';
+    expect((await withPassword("/api/first_run/check", { password, token: encoded(password) })).status).toBe(204);
+    // Not percent-encoded, as a script might send it, whether or not it reads as encoded.
+    for (const raw of ["100%sure, of course", "correct%20horse battery"]) {
+      expect((await withPassword("/api/first_run/check", { password: raw, token: raw })).status, raw).toBe(204);
+      expect((await withPassword("/api/first_run/check", { password: raw, token: `  ${raw}` })).status, raw).toBe(204);
+      expect((await withPassword("/api/first_run/check", { password: raw, token: encoded(raw) })).status, raw).toBe(204);
+    }
+    expect((await withPassword("/api/first_run/check", { password: "100%sure, of course", token: "100%sure" })).status).toBe(403);
+  });
+
+  it("takes a setup password of any length, since Deploy to Cloudflare's form can't ask for a longer one", async () => {
+    const short = "ü7";
+    for (const secrets of [{ password: short }, { secret: short }, { secret: ` ${short} `, password: "" }]) {
+      const given = { secret: undefined, ...secrets };
+      expect(await setupAccessAt(origin, given.secret, given.password), JSON.stringify(secrets)).toBe("password");
+      expect((await firstRunAt(`${origin}/api/first_run/check`, { ...given, token: encoded(short) })).status, JSON.stringify(secrets)).toBe(204);
+    }
+    expect((await withPassword("/api/first_run", { password: short, token: encoded("ü8") })).status).toBe(403);
+    expect((await withPassword("/api/first_run", { password: short, token: encoded(short) })).status).toBe(201);
+  });
+
+  it("takes a setup token that isn't shaped like one as a setup password, as one typed into the dashboard may be", async () => {
+    const secret = "Hunter2".repeat(2);
+    expect(await setupAccessAt(origin, secret)).toBe("password");
+    const refused = await firstRunWith({ secret, token: encoded("hunter2hunter2") });
+    expect([refused.status, await refused.json()]).toEqual([403, { error: SETUP_PASSWORD_REFUSED }]);
+    expect((await firstRunWith({ secret })).status).toBe(403);
+    expect((await firstRunWith({ secret, token: encoded(secret) })).status).toBe(201);
+  });
+
+  it("takes the setup link's token too, where a deploy made one as well as the form's password", async () => {
+    expect(await setupAccessAt(origin, SETUP_TOKEN, SETUP_PASSWORD)).toBe("password");
+    const none = await firstRunWith({ password: SETUP_PASSWORD });
+    expect([none.status, await none.json()]).toEqual([403, { error: SETUP_PASSWORD_NEEDED }]);
+    expect((await firstRunAt(`${origin}/api/first_run/check`, { secret: SETUP_TOKEN, password: SETUP_PASSWORD, token: encoded(SETUP_PASSWORD) })).status).toBe(204);
+    expect((await firstRunWith({ password: SETUP_PASSWORD, token: SETUP_TOKEN })).status).toBe(201);
+  });
+
+  it("allows 10 tries at the setup password every 10 minutes, from anywhere, counting tries sent at once", async () => {
+    const start = Date.now();
+    // The Workspace runs in this isolate, so it sees the faked clock too.
+    vi.useFakeTimers({ toFake: ["Date"], now: start });
+    const tries = await Promise.all(Array.from({ length: 12 }, (_, n) => withPassword("/api/first_run/check", { token: encoded(`wrong guess ${n}`), ip: `198.51.100.${n}` })));
+    expect(tries.map((response) => response.status).sort()).toEqual([...Array(10).fill(403), 429, 429]);
+
+    // Past the limit even the right password waits, and so does the form.
+    for (const path of ["/api/first_run/check", "/api/first_run"]) {
+      const limited = await withPassword(path, { token: encoded(SETUP_PASSWORD) });
+      expect([limited.status, await limited.json()], path).toEqual([429, { error: SETUP_TRIES_LIMITED }]);
+    }
+    // Though not a setup link's token, which is too long to guess.
+    expect((await firstRunAt(`${origin}/api/first_run/check`, { secret: SETUP_TOKEN, password: SETUP_PASSWORD, token: SETUP_TOKEN })).status).toBe(204);
+    // Nor someone without a password, who isn't counted.
+    expect((await withPassword("/api/first_run")).status).toBe(403);
+    await nothingCreated();
+
+    vi.setSystemTime(start + 10 * 60 * 1000 - 1);
+    expect((await withPassword("/api/first_run/check", { token: encoded(SETUP_PASSWORD) })).status).toBe(429);
+    vi.setSystemTime(start + 10 * 60 * 1000);
+    expect((await withPassword("/api/first_run", { token: encoded(SETUP_PASSWORD) })).status).toBe(201);
   });
 });
 

@@ -99,4 +99,15 @@ describe("@-mention people", () => {
 </lexxy-prompt-item>
 `);
   });
+
+  it("badges an agent after its name in the prompt, but not in the mention picking it writes", () => {
+    const ember = { id: "ember", name: "Ember", avatarUrl: "/users/ember.x/avatar?v=1" };
+    const emberAvatar = '<img class="avatar" aria-hidden="true" src="/users/ember.x/avatar?v=1" width="48" height="48">';
+    expect(mentionPromptItem({ ...ember, agent: true })).toBe(`<lexxy-prompt-item search="Ember" sgid="ember">
+  <template type="menu"><span class="autocomplete__item">${emberAvatar}<span class="autocompletable__name">Ember</span> <span class="autocompletable__badge">Agent</span></span></template>
+  <template type="editor">${mentionContent(ember)}</template>
+</lexxy-prompt-item>
+`);
+    expect(mentionPromptItem({ ...ada, agent: false })).toBe(mentionPromptItem(ada));
+  });
 });

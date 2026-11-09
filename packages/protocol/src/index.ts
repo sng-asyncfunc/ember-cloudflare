@@ -2,7 +2,7 @@
 // object with a `type`, and what the API sends and takes. Keep this file dependency-free: the
 // worker and the web app both import it directly as TypeScript.
 
-import type { AssistantSettings, YourAnswerLevels } from "./assistant.ts";
+import type { AssistantSettings, YourAssistant } from "./assistant.ts";
 import type { Card } from "./cards.ts";
 import type { StoredFile } from "./files.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
@@ -48,15 +48,25 @@ export type {
   AnswerLength,
   AnswerLevelChanges,
   AnswerLevels,
-  AnswerLevelsAnswer,
+  AssistantCatalog,
   AssistantChanged,
+  AssistantChanges,
   AssistantForgotten,
+  AssistantKeys,
+  AssistantModel,
   AssistantSaved,
   AssistantSettings,
   AssistantSetup,
   ModelFormat,
+  ModelPrice,
+  NewAssistantModel,
   ThinkingLevel,
-  YourAnswerLevels,
+  WebSearchChange,
+  WebSearchChanged,
+  WebTool,
+  YourAssistant,
+  YourAssistantChanged,
+  YourAssistantChanges,
 } from "./assistant.ts";
 export {
   FILE_NAME_NOT_KEPT,
@@ -123,16 +133,29 @@ export {
 } from "./push.ts";
 export { TRANSLATIONS, type TranslationKey } from "./translations.ts";
 export {
+  hasFilters,
+  hasWords,
   isSearchable,
   MAX_SEARCH_LENGTH,
+  normalizedSearch,
   parseSearch,
   RECENT_SEARCHES,
   sanitizeSearch,
+  SEARCH_FLAGS,
   SEARCH_LIMIT,
   SEARCH_TOO_LONG,
+  searchKey,
+  searchOfQuery,
   searchPath,
+  searchQuery,
   searchTerms,
+  type Search,
+  type SearchFilters,
+  type SearchFlag,
+  type SearchMatch,
+  type SearchParams,
   type SearchResults,
+  type SearchSort,
 } from "./search.ts";
 
 export type UserId = string;
@@ -164,7 +187,7 @@ export interface DirectoryUser extends User {
   bio: string | null;
   role: Role;
   status: UserStatus;
-  /** Their avatar, `/users/<token>/avatar?v=<version>`, whose address changes whenever they do. */
+  /** Their avatar, `/users/<token>/avatar?v=<version>`, whose address changes whenever they do, and @ember's with each release too. */
   avatarUrl: string;
 }
 
@@ -468,6 +491,11 @@ export interface WorkspaceSettings {
   addresses: EmberAddresses;
   /** Ember AI as the AI assistant tab shows it, for administrators while it's on, and null otherwise. */
   assistant: AssistantSettings | null;
+  /**
+   * The ID of the Cloudflare account Ember is deployed to, which Set up Ember AI fills in, for
+   * administrators once the deploy has given it to the Worker, and null otherwise.
+   */
+  cloudflareAccountId: string | null;
 }
 
 /**
@@ -746,14 +774,28 @@ export const EMBER_REPOSITORY = "https://github.com/NYLLON-SOFTWARE/ember-cloudf
 export const UPDATING_EMBER = `${EMBER_REPOSITORY}/blob/main/docs/self-hosting.md#updating`;
 
 /**
- * What `GET /api/account/release` answers an administrator, for General settings to say: the release
- * this Ember is, named without its version's trailing ".0", such as "0.1", and the newest release of
- * Ember on GitHub, named so too, with the address of its notes there and whether it's newer than this
+ * What `GET /api/account/release` answers an administrator, for General settings to say, and `POST
+ * /api/account/release_checks`, which opening Admin makes to have the Worker ask GitHub afresh: the
+ * release this Ember is, named without its version's trailing ".0", such as "0.1", and the newest release
+ * of Ember on GitHub, named so too, with the address of its notes there and whether it's newer than this
  * one, or null when GitHub didn't name one.
  */
 export interface ReleaseCheck {
   release: string;
   newest: { release: string; notes: string; newer: boolean } | null;
+  /** The copy of Ember this is on GitHub, as its deploy said, or null where it said none. */
+  copy: CopyOnGitHub | null;
+}
+
+/**
+ * A copy of Ember on GitHub, as its deploy tells the Worker: its repository, as `owner/name`, the branch
+ * that deploys, and whether it has the Update Ember workflow, for General's release card to link to
+ * running it, or to adding it.
+ */
+export interface CopyOnGitHub {
+  repository: string;
+  branch: string;
+  workflow: boolean;
 }
 
 /** The roles an administrator can give someone with the crown on workspace settings. Bots stay bots. */
@@ -813,8 +855,8 @@ export interface Profile {
    * who has nothing to connect.
    */
   memberful: boolean | null;
-  /** How much @ember thinks and how long it answers you, and the most each may be, or null while Ember AI is off. */
-  assistant: YourAnswerLevels | null;
+  /** How much @ember thinks and how long it answers you, and the most each may be, and the model you picked, if you did, and the ones you can pick, or null while Ember AI is off. */
+  assistant: YourAssistant | null;
 }
 
 /** What `GET /api/users/me/profile` answers, and `PATCH` once it has saved. */
@@ -849,12 +891,15 @@ export interface SetupPlaceholders {
 }
 
 /**
- * How setup can be reached from where the app runs: with the deploy's setup link, which ends in the
- * deployment's `EMBER_SETUP_TOKEN` secret; open to whoever is here, over loopback, where `wrangler dev`
- * serves, while no token is set; or closed until a deploy, or `wrangler secret put EMBER_SETUP_TOKEN`,
- * gives the deployment a token.
+ * How setup can be reached from where the app runs, while Ember waits to be set up:
+ * - "password": with the deployment's setup password, which Deploy to Cloudflare's form asks the deployer
+ *   to make up (`EMBER_SETUP_PASSWORD`), typed into the page;
+ * - "link": with the setup link a deploy from a terminal prints, which ends in the deployment's
+ *   `EMBER_SETUP_TOKEN`;
+ * - "open": by whoever is here, over loopback, where `wrangler dev` serves, while the deployment has neither;
+ * - "closed": by nobody, while it has neither.
  */
-export type SetupAccess = "link" | "open" | "closed";
+export type SetupAccess = "password" | "link" | "open" | "closed";
 
 /** What the app asks first (`GET /api/bootstrap`): whether Ember is set up, and who this browser is signed in as. */
 export interface Bootstrap {

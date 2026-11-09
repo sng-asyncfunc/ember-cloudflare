@@ -13,6 +13,16 @@
   "observability": { "enabled": true, "traces": { "enabled": true } },
   // Lets production CPU and heap profiles and exception stacks name our source files.
   "upload_source_maps": true,
+  // Ember answers at its workers.dev address until an administrator gives it a domain of its own, and goes
+  // back there from one (docs/self-hosting.md#a-custom-domain), so every deploy keeps that address on.
+  // Preview URLs stay off: Cloudflare makes no Version URLs for a Worker with Durable Objects, and the
+  // Previews below can't run Ember.
+  "workers_dev": true,
+  "preview_urls": false,
+  // Workers Builds builds each branch but the production one as a Preview, which `wrangler preview` won't
+  // make without this block. Empty, it gives a Preview none of the bindings below, and preview_urls gives
+  // it no address, so a branch's build only checks that Ember builds.
+  "previews": {},
 
   // The built React app. Everything but its static files goes to the Worker first, page loads
   // included, so each answer carries Campfire's headers and old browsers get the upgrade page;
@@ -23,7 +33,7 @@
     "directory": "apps/web/dist",
     "binding": "ASSETS",
     "not_found_handling": "404-page",
-    "run_worker_first": ["/*", "!/assets/*", "!/browsers/*", "!/globe.svg", "!/logos/*", "!/lucide/*", "!/iconoir/*", "!/screenshots/*", "!/shortcuts/*", "!/ember-icon.png", "!/robots.txt"]
+    "run_worker_first": ["/*", "!/assets/*", "!/browsers/*", "!/globe.svg", "!/logos/*", "!/lucide/*", "!/iconoir/*", "!/screenshots/*", "!/shortcuts/*", "!/ember-icon.png", "!/assistant-avatar.svg", "!/robots.txt"]
   },
 
   // One ChatRoom object per room, which owns its sockets, presence and (by default) its messages,
@@ -61,11 +71,12 @@
     // "do-sqlite" keeps each room's messages in its Durable Object's SQLite storage.
     // "d1" writes them to the shared D1 database below instead.
     "STORAGE_BACKEND": "do-sqlite"
-  }
+  },
 
-  // To use D1, create a database (`pnpm exec wrangler d1 create ember`), paste its id here,
-  // set STORAGE_BACKEND to "d1", and apply apps/worker/migrations/ with `pnpm --filter @ember/worker d1:migrate:local`.
-  // "d1_databases": [
-  //   { "binding": "DB", "database_name": "ember", "database_id": "<your-database-id>", "migrations_dir": "apps/worker/migrations" }
-  // ]
+  // The D1 database messages go to when STORAGE_BACKEND is "d1" (docs/self-hosting.md#storage-durable-object-sqlite-or-d1).
+  // Deploy to Cloudflare's form makes one for every copy, as it can't make one only for "d1", and
+  // `pnpm run deploy` binds it only for "d1", making it first if the account has none of this name, and
+  // applying apps/worker/migrations/ to it. `wrangler dev` keeps one on this machine, which
+  // `pnpm --filter @ember/worker d1:migrate:local` migrates.
+  "d1_databases": [{ "binding": "DB", "database_name": "ember", "migrations_dir": "apps/worker/migrations" }]
 }

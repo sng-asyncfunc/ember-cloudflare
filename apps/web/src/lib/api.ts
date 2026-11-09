@@ -3,13 +3,15 @@ import {
   LOGO_PATH,
   MEMBERFUL_CONNECTIONS_PATH,
   roomSocketQuery,
+  searchQuery,
   WORKSPACE_PRELOADS,
   type Account,
   type AccountChanges,
-  type AnswerLevelChanges,
-  type AnswerLevelsAnswer,
+  type AssistantCatalog,
   type AssistantChanged,
+  type AssistantChanges,
   type AssistantForgotten,
+  type AssistantKeys,
   type AssistantSaved,
   type AssistantSetup,
   type Bootstrap,
@@ -40,6 +42,7 @@ import {
   type Me,
   type MemberfulConnection,
   type MemberfulConnectionStart,
+  type NewAssistantModel,
   type NewDirect,
   type NewJoinCode,
   type NewRoom,
@@ -66,7 +69,9 @@ import {
   type RoomSettings,
   type RoomSocketParams,
   type SavedPushSubscription,
+  type Search,
   type SearchResults,
+  type SearchSort,
   type SendingDomainCheck,
   type SentTestEmail,
   type SharedRoom,
@@ -77,7 +82,10 @@ import {
   type TurnstileKeysChange,
   type TurnstileSettings,
   type UserId,
+  type WebSearchChanged,
   type WorkspaceSettings,
+  type YourAssistantChanged,
+  type YourAssistantChanges,
 } from "@ember/protocol";
 import type { LogoVariants } from "@/lib/previews";
 
@@ -156,12 +164,26 @@ export function dropWorkspacePreloads(): void {
 }
 
 /**
- * Sets up the workspace with its first administrator, with the photo they chose, if any, and signs this
- * browser in as them. A photo that's refused fails with an ApiError for the `avatar` field.
+ * The setup password, or the setup link's token, as a bearer token: percent-encoded, since a header can't
+ * hold every character a password can.
  */
-export async function setUpWorkspace(administrator: SignUp, photo: ChosenPhoto | null = null, setupToken: string | null = null): Promise<NewWorkspace> {
-  // The setup link's token goes as a bearer token.
-  const headers = setupToken === null ? undefined : { Authorization: `Bearer ${setupToken}` };
+const setupAuthorization = (secret: string) => ({ Authorization: `Bearer ${encodeURIComponent(secret)}` });
+
+/**
+ * Checks the setup password typed into Set up Ember before the rest of its form is filled in, failing
+ * with an ApiError that says why the Worker refuses it.
+ */
+export async function checkSetupPassword(password: string): Promise<void> {
+  await request<unknown>("/api/first_run/check", { method: "POST", headers: setupAuthorization(password) });
+}
+
+/**
+ * Sets up the workspace with its first administrator, with the photo they chose, if any, and signs this
+ * browser in as them, with the setup password or link's token where the deployment takes one. A photo
+ * that's refused fails with an ApiError for the `avatar` field.
+ */
+export async function setUpWorkspace(administrator: SignUp, photo: ChosenPhoto | null = null, setupSecret: string | null = null): Promise<NewWorkspace> {
+  const headers = setupSecret === null ? undefined : setupAuthorization(setupSecret);
   return request<NewWorkspace>("/api/first_run", { method: "POST", headers, body: userBody(administrator, photo) });
 }
 
@@ -361,10 +383,16 @@ export async function lookUpCustomDomain(domain: string): Promise<CustomDomainLo
 
 /**
  * The release this Ember is, and the newest one GitHub names, as General settings says, null when GitHub
- * didn't name one. Fails with a 403 ApiError for anyone but an administrator.
+ * didn't name one, as GitHub last told the Worker, which asks it again every six hours. Fails with a 403
+ * ApiError for anyone but an administrator.
  */
 export async function checkForRelease(): Promise<ReleaseCheck> {
   return request<ReleaseCheck>("/api/account/release");
+}
+
+/** The same, once the Worker has asked GitHub again, as opening Admin has it do, unless it asked in the last minute. */
+export async function checkForReleaseAfresh(): Promise<ReleaseCheck> {
+  return request<ReleaseCheck>("/api/account/release_checks", { method: "POST" });
 }
 
 /** A logo chosen for the workspace, with the variants made of it, or null where none could be made (`logoVariantsOf`). */
@@ -494,6 +522,15 @@ export async function forgetTurnstileKeys(): Promise<TurnstileSettings["turnstil
 }
 
 /**
+ * The text models Cloudflare's catalog lists for the account `keys` gives, with its API token, or the one
+ * Ember has, when it gives none, or else the models Ember knows, and why the catalog couldn't be read.
+ * Fails with a 422 ApiError on the field the Worker refuses, and a 403 one for anyone but an administrator.
+ */
+export async function listAssistantModels(keys: AssistantKeys): Promise<AssistantCatalog> {
+  return request<AssistantCatalog>("/api/account/assistant/catalog", { method: "POST", body: JSON.stringify(keys) });
+}
+
+/**
  * Turns Ember AI on with `setup`, or changes it, once the model has answered a test question through AI
  * Gateway, answering Ember AI as it is then and what the model said. Fails with a 422 ApiError on the
  * field AI Gateway or the Worker refuses, or with none for the credits, a 429 one while AI Gateway turns
@@ -503,22 +540,72 @@ export async function saveAssistant(setup: AssistantSetup): Promise<AssistantSav
   return request<AssistantSaved>("/api/account/assistant", { method: "PUT", body: JSON.stringify(setup) });
 }
 
+/**
+ * Adds `model` to the models people can pick, once it has answered a test question through Ember AI's
+ * account, answering Ember AI as it is then and what the model said. Fails as `saveAssistant` does, with
+ * a 422 ApiError on the model's field once people can pick as many as they can, and a 409 one while
+ * Ember AI is off, or once it was set up again while the model answered.
+ */
+export async function addAssistantModel(model: NewAssistantModel): Promise<AssistantSaved> {
+  return request<AssistantSaved>("/api/account/assistant/models", { method: "POST", body: JSON.stringify(model) });
+}
+
+/**
+ * Takes the model `model` out of those people can pick, answering Ember AI as it is then. Fails with a
+ * 409 ApiError for the one that answers everyone, or while Ember AI is off, and a 403 one for anyone but
+ * an administrator.
+ */
+export async function removeAssistantModel(model: string): Promise<AssistantChanged["assistant"]> {
+  return (await request<AssistantChanged>("/api/account/assistant/models", { method: "DELETE", body: JSON.stringify({ model }) })).assistant;
+}
+
+/**
+ * Gives @ember the avatar `photo` is, in place of Ember's flame or the one it had, answering Ember AI as
+ * it is then. Fails with a 409 ApiError while Ember AI is off, and a 403 one for anyone but an
+ * administrator.
+ */
+export async function changeAssistantAvatar(photo: ChosenPhoto): Promise<AssistantChanged["assistant"]> {
+  return (await request<AssistantChanged>("/api/account/assistant/avatar", { method: "PUT", body: photoForm(photo) })).assistant;
+}
+
+/** Takes away the avatar @ember was given, bringing back Ember's flame, answering Ember AI as it is then. Fails as `changeAssistantAvatar` does. */
+export async function removeAssistantAvatar(): Promise<AssistantChanged["assistant"]> {
+  return (await request<AssistantChanged>("/api/account/assistant/avatar", { method: "DELETE" })).assistant;
+}
+
 /** Turns Ember AI off, forgetting its API token. Fails with a 403 ApiError for anyone but an administrator. */
 export async function forgetAssistant(): Promise<null> {
   return (await request<AssistantForgotten>("/api/account/assistant", { method: "DELETE" })).assistant;
 }
 
 /**
- * Changes the most each of @ember's dials goes to for anyone's questions, answering Ember AI as it is
- * then. Fails with a 409 ApiError while it's off, and a 403 one for anyone but an administrator.
+ * Changes the most each of @ember's dials goes to for anyone's questions, or which of the models people
+ * can pick it answers everyone else with, answering Ember AI as it is then. Fails with a 409 ApiError
+ * while it's off, a 422 one for a model people can't pick, and a 403 one for anyone but an administrator.
  */
-export async function changeAssistantMost(changes: AnswerLevelChanges): Promise<AssistantChanged["assistant"]> {
+export async function changeAssistantSettings(changes: AssistantChanges): Promise<AssistantChanged["assistant"]> {
   return (await request<AssistantChanged>("/api/account/assistant", { method: "PATCH", body: JSON.stringify(changes) })).assistant;
 }
 
-/** Changes how much @ember thinks and how long it answers you, answering your levels as they are then, or null while Ember AI is off. */
-export async function changeAnswerLevels(changes: AnswerLevelChanges): Promise<AnswerLevelsAnswer["assistant"]> {
-  return (await request<AnswerLevelsAnswer>("/api/users/me/assistant", { method: "PATCH", body: JSON.stringify(changes) })).assistant;
+/**
+ * Turns Search the web on, once the model Ember AI answers everyone with has searched the web for a test
+ * question through AI Gateway, or off, answering Ember AI as it is then and, once it's on, what the model
+ * said. Fails with a 422 ApiError when AI Gateway refused the model's tools for the web, the model
+ * answered without searching or can't search, a 429 one while AI Gateway turns requests away, a 502 one
+ * when it didn't answer, a 409 one while Ember AI is off, or changed while the model searched, and a 403
+ * one for anyone but an administrator.
+ */
+export async function changeWebSearch(on: boolean): Promise<WebSearchChanged> {
+  return request<WebSearchChanged>("/api/account/assistant/web_search", { method: "PUT", body: JSON.stringify({ on }) });
+}
+
+/**
+ * Changes how much @ember thinks and how long it answers you, or the model it answers you with, answering
+ * yours as they are then, or null while Ember AI is off. Fails with a 422 ApiError for a model people
+ * can't pick.
+ */
+export async function changeYourAssistant(changes: YourAssistantChanges): Promise<YourAssistantChanged["assistant"]> {
+  return (await request<YourAssistantChanged>("/api/users/me/assistant", { method: "PATCH", body: JSON.stringify(changes) })).assistant;
 }
 
 /**
@@ -679,14 +766,17 @@ export async function fetchLinkPreview(url: string, signal: AbortSignal): Promis
   return preview.title && preview.url ? (preview as LinkPreview) : null;
 }
 
-/** What a search for `q` finds, as it was typed, with your recent searches; all you have of them without one. */
-export async function fetchSearch(q: string | null): Promise<SearchResults> {
-  return request<SearchResults>(q === null ? "/api/searches" : `/api/searches?q=${encodeURIComponent(q)}`);
+/**
+ * A page of what `search` finds, sorted by `sort`, from `cursor` on, as the results page asks for it, with
+ * your recent searches, which are all a search with no words or filters has.
+ */
+export async function fetchSearch(search: Search, sort: SearchSort = "newest", cursor?: number): Promise<SearchResults> {
+  return request<SearchResults>(`/api/searches?${searchQuery(search, sort, cursor)}`);
 }
 
-/** Searches for `q`, as it was typed, recording it as your newest recent search, as the search page's form does. */
-export async function recordSearch(q: string): Promise<SearchResults> {
-  return request<SearchResults>("/api/searches", { method: "POST", body: JSON.stringify({ q }) });
+/** Searches for `search`, recording it as your newest recent search, as the search box does, and answers its first page, sorted by `sort`. */
+export async function recordSearch(search: Search, sort: SearchSort = "newest"): Promise<SearchResults> {
+  return request<SearchResults>("/api/searches", { method: "POST", body: JSON.stringify({ ...search, sort }) });
 }
 
 /** Forgets your recent searches. */

@@ -70,9 +70,12 @@ export class Member {
   /**
    * Shows a message's action bar by hovering it, and returns the bar. It waits for the room to confirm a
    * message just sent, which has no bar until then, so the pointer doesn't come to rest on it too soon.
+   * The pointer comes from the page's heading, since a bar that a click shut, as a click on the message's
+   * file card does, opens again only as the pointer comes back to its message.
    */
   async actions(text: string): Promise<Locator> {
     await expect(this.message(text)).not.toHaveAttribute("aria-busy");
+    await this.page.getByRole("heading", { level: 1 }).hover();
     await this.message(text).hover();
     return this.message(text).getByRole("group", { name: "Message actions" });
   }

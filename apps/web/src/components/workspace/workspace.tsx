@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { startingInvolvement, type Account, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User } from "@ember/protocol";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { searchOfQuery, startingInvolvement, type Account, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User } from "@ember/protocol";
 import { useFlash } from "@/components/flash";
 import { Xmark } from "@/components/icons/iconoir";
 import { MainContent, SkipLink } from "@/components/main-content";
@@ -12,6 +12,7 @@ import { useReleaseCheck } from "@/hooks/use-release-check";
 import { useSidebar } from "@/hooks/use-sidebar";
 import { ApiError, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
 import { whenIdle } from "@/lib/idle";
+import { opensFind } from "@/lib/keyboard";
 import { lastRoomVisited } from "@/lib/last-room";
 import { takeMemberfulFlash } from "@/lib/memberful";
 import { loadPage } from "@/lib/page";
@@ -23,6 +24,7 @@ import { NewDirectDialog } from "./new-direct-dialog";
 import { DrawerOpen, PageHeader } from "./page-header";
 import { Rail, type RailPage } from "./rail";
 import { RoomView, type RoomViewHandle } from "./room-view";
+import { OpenSearchContext, SearchBox, type SearchBoxOptions } from "./search-box";
 import { SettingsLayout, settingsSectionOf, type SettingsPlace } from "./settings-navigation";
 import { Sidebar } from "./sidebar";
 import { WelcomePage } from "./welcome-page";
@@ -303,8 +305,9 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   // doesn't wait for them. If they fail to, the first page that needs them tries again.
   const listed = rooms !== null;
   useEffect(() => (listed ? whenIdle(() => void loadRarePages().catch(() => {})) : undefined), [listed]);
-  // And for an administrator, whether a newer release of Ember is out, which the rail's Admin marks.
-  const release = useReleaseCheck(administrator, listed);
+  // And for an administrator, whether a newer release of Ember is out, which the rail's Admin marks, asked
+  // afresh each time Admin opens.
+  const release = useReleaseCheck(administrator, listed, settings !== null);
   const newRelease = release?.newest?.newer ? release.newest.release : null;
 
   // On a phone, the drawer closes as New direct message opens.
@@ -315,6 +318,13 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   useLayoutEffect(() => {
     if (route.page === "new-direct") openNewDirect(null);
   }, [route]);
+
+  // The search box, while it's open, with what it opened with. On a phone, the drawer closes as it opens.
+  const [searchBox, setSearchBox] = useState<SearchBoxOptions | null>(null);
+  const openSearch = useCallback((options: SearchBoxOptions) => {
+    setDrawerOpen(false);
+    setSearchBox(options);
+  }, []);
 
   const flash = useFlash();
   const mounted = useMounted();
@@ -494,6 +504,23 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
       });
     },
   };
+  // Cmd+F or Ctrl+F opens the search box, as it opens Slack's: in the room shown, or with the search the
+  // results page shows, or for everything. In a dialog, the search box among them, the key is the browser's.
+  const findPressed = useEffectEvent((event: KeyboardEvent) => {
+    if (event.defaultPrevented || !opensFind(event)) return;
+    if (event.target instanceof Element && event.target.closest("[role=dialog]")) return;
+    event.preventDefault();
+    // Before the sidebar has listed the rooms, the room the address names.
+    if (route.page !== "search") return openSearch({ opener: null, roomId: currentRoomId ?? (rooms === null && route.page === "room" ? route.roomId : null) });
+    const { search, sort } = searchOfQuery(new URLSearchParams(location.search));
+    openSearch({ opener: null, search, sort });
+  });
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => findPressed(event);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
+
   // The app's badge counts what Activity does, as badge_dot_controller.js counts the sidebar's unread rows,
   // once the server's list has come: the empty one a failed first load leaves knows nothing of what's unread.
   useAppBadge(answered ? activity.unread : null);
@@ -575,7 +602,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
       case "push-subscriptions":
         return rarePage(({ PushSubscriptionsPage }) => <PushSubscriptionsPage back={back} onFailed={failed} />);
       case "search":
-        return rarePage(({ SearchPage }) => <SearchPage me={me} back={back} onFailed={failed} />);
+        return rarePage(({ SearchPage }) => <SearchPage me={me} rooms={rooms ?? NO_ROOMS} back={back} onFailed={failed} />);
       case "person":
         return rarePage(({ PersonPage }) => (
           <PersonPage
@@ -730,6 +757,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
               onFailed={failed}
             />
           )}
+          {searchBox && <SearchBox {...searchBox} me={me} rooms={rooms ?? NO_ROOMS} onClose={() => setSearchBox(null)} onFailed={failed} />}
         </div>
       </DrawerOpen>
     </Sheet>
@@ -737,7 +765,9 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   return (
     <PeopleContext value={directory.people}>
       <DirectoryLoaded value={directory.loaded}>
-        <SettingsLayout value={settings}>{layout}</SettingsLayout>
+        <SettingsLayout value={settings}>
+          <OpenSearchContext value={openSearch}>{layout}</OpenSearchContext>
+        </SettingsLayout>
       </DirectoryLoaded>
     </PeopleContext>
   );

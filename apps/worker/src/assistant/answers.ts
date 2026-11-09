@@ -1,18 +1,19 @@
 import { ASSISTANT_ID, ASSISTANT_NAME, isMessageTooLong, MAX_MESSAGE_HTML_LENGTH, type Card, type CardImage, type LinkPreview, type Message, type User } from "@ember/protocol";
-import { ANSWER_WORDS, THINKING_TOKENS, type AnswerLength, type AnswerLevels } from "@ember/protocol/assistant";
+import { ANSWER_WORDS, THINKING_TOKENS, type AnswerLength, type AnswerLevels, type WebTool } from "@ember/protocol/assistant";
 import { OPENGRAPH_EMBED_CONTENT_TYPE, prepareBody, previewContent } from "@ember/richtext";
 import { decodeHTMLStrict } from "entities/decode";
 import { Marked } from "marked";
 import { markdownHtml } from "../bots/markdown";
-import { escapeText, linkHref } from "../bots/mrkdwn";
-import type { Question, RefusalReason, Turn } from "./gateway";
+import { anchor, escapeText, linkHref } from "../bots/mrkdwn";
+import { MAX_SOURCES, type Question, type RefusalReason, type Source, type Turn } from "./gateway";
 
 // What @ember asks its model when someone asks it something, and what it answers with. It reads the
 // conversation it's asked in, each message after its writer's name, and answers in Markdown, thinking
-// and writing as much as the asker's levels allow, which it posts as the rich text people write
-// (`markdownHtml`), the pictures it shows in a card under it, as bots' image cards are, and a preview of
-// its first link, as the composer adds one below a link. When it can't answer, it says why, in words
-// that say who can do something about it.
+// and writing as much as the asker's levels allow, and searching the web and reading pages while Search
+// the web lets it, which it posts as the rich text people write (`markdownHtml`), the pictures it shows
+// in a card under it, as bots' image cards are, the pages it came from after it, and a preview of its
+// first link, as the composer adds one below a link. When it can't answer, it says why, in words that
+// say who can do something about it.
 
 /** How many of the room's latest messages @ember reads when it's asked in the room, the question among them. */
 export const ROOM_MESSAGES_READ = 20;
@@ -63,24 +64,66 @@ export class AnswerError extends Error {}
 
 /**
  * What @ember asks its model about the question `conversation` ends with, which `asker` asked `where`,
- * at `now`: the conversation it can read, its writers named, how to answer, and how much to think and
- * write, at the asker's `levels`, labeled with who asked.
+ * at `now`: the conversation it can read, its writers named, how to answer, how much to think and
+ * write, at the asker's `levels`, and what it may do on the web, `webTools`, labeled with who asked.
+ * With no tools for searching while Search the web is on, `webSearchOn`, it's told the model the asker
+ * picked can't search, rather than that an administrator could let it, and with tools, how to answer
+ * without them too, as it's asked again without them when AI Gateway doesn't take them (`ask`).
  */
-export function questionFor(conversation: Message[], asker: User, where: AskedIn, levels: AnswerLevels, now: Date): Question {
-  const instructions = instructionsFor(asker, where, ANSWER_WORDS[levels.length], now);
-  return { instructions, turns: turnsOf(readable(conversation, where.inThread)), maxTokens: maxTokensAt(levels), thinking: levels.thinking, askerId: asker.id };
+export function questionFor(
+  conversation: Message[],
+  asker: User,
+  where: AskedIn,
+  levels: AnswerLevels,
+  now: Date,
+  webTools: readonly WebTool[] = [],
+  webSearchOn = webTools.includes("search"),
+): Question {
+  const told = (web: string) => instructionsFor(asker, where, ANSWER_WORDS[levels.length], now, web);
+  return {
+    instructions: told(webInstructionsFor(asker, webTools, webSearchOn)),
+    ...(webTools.length > 0 && { instructionsWithoutWeb: told(WEB_TOOLS_REFUSED) }),
+    turns: turnsOf(readable(conversation, where.inThread)),
+    maxTokens: maxTokensAt(levels),
+    thinking: levels.thinking,
+    askerId: asker.id,
+    webTools,
+  };
 }
 
-/** What @ember is told before the conversation, asked to answer in about `words` words at most. */
-function instructionsFor(asker: User, { community, roomName, inThread }: AskedIn, words: number, now: Date): string {
+/** What @ember is told before the conversation, asked to answer in about `words` words at most, and what it's told of the web, `web`. */
+function instructionsFor(asker: User, { community, roomName, inThread }: AskedIn, words: number, now: Date, web: string): string {
   const room = roomName === null ? "a direct message" : `the room "${roomName}"`;
   const today = new Intl.DateTimeFormat("en-US", { dateStyle: "full", timeZone: "UTC" }).format(now);
   return [
     `You are ${ASSISTANT_NAME}, the AI assistant in the team chat "${community}". People ask you things by mentioning @ember in a room or a thread, or by writing to you directly.`,
     `You're asked in ${inThread ? `a thread in ${room}` : room}. Its messages follow, oldest first, each after its writer's name. Answer the last one, which ${asker.name} wrote, as a helpful teammate would: plainly, and in at most about ${words.toLocaleString("en-US")} words.`,
     "Write in Markdown. Links, bold, italics, lists, quotes, code blocks and tables show as they do in the chat, and a picture you show with ![what it shows](its address) appears under your answer. Don't begin with your name.",
+    web,
     `Today is ${today}, in UTC.`,
   ].join("\n\n");
+}
+
+/** What @ember is told when it's asked again without the web, as AI Gateway didn't take its model's tools for it. */
+const WEB_TOOLS_REFUSED =
+  "You can't search the web or open links this time, as AI Gateway didn't take the tools for them with the model you answer with. When someone asks you to, say so.";
+
+/**
+ * What @ember is told it may do on the web with `webTools`, or, with none, that it can't, and who could let
+ * it: `asker`, by picking a model that can, while Search the web is on, `webSearchOn`, or else an administrator.
+ */
+function webInstructionsFor(asker: User, webTools: readonly WebTool[], webSearchOn: boolean): string {
+  if (!webTools.includes("search") && webSearchOn) {
+    return `You can't search the web or open links with the model ${asker.name} picked for your answers to them. When they ask you to, say so, and that they can pick one that can, Anthropic's or OpenAI's, under Ember AI on their profile.`;
+  }
+  if (!webTools.includes("search")) {
+    return `You can't search the web or open links. When someone asks you to, say so, and that an administrator can turn on Search the web under ${SETTINGS}.`;
+  }
+  const reading = webTools.includes("read") ? ", and read the pages people link to or your searches find," : "";
+  return [
+    `You can search the web${reading} when a question needs what's current, or what you don't know.`,
+    "Only what you write after you last search or read is posted, so write all of your answer then. The chat lists the pages you cite after it, so don't list them yourself.",
+  ].join(" ");
 }
 
 /**
@@ -124,31 +167,70 @@ export interface Answer {
 
 const markdown = new Marked({ gfm: true });
 
+/** The most characters of a page's title that its link among an answer's sources shows. */
+const MAX_SOURCE_TITLE_LENGTH = 80;
+
+/**
+ * The most markup a link to one of an answer's sources may take, so that all it names take about half of
+ * what a message holds at most, leaving the rest to the answer: a page whose address is longer goes unnamed.
+ */
+const MAX_SOURCE_LINK_LENGTH = MAX_MESSAGE_HTML_LENGTH / (2 * MAX_SOURCES);
+
 /**
  * `text`, the model's answer in Markdown, as @ember posts it, without its name in front, where the
- * conversation's form leads some models to write it, and cut to what one message holds.
+ * conversation's form leads some models to write it, then the `sources` it came from, all cut to what
+ * one message holds, which cuts the answer, as its sources are what it says it came from.
  */
-export function answerOf(text: string): Answer {
+export function answerOf(text: string, sources: readonly Source[] = []): Answer {
   const answer = text.replace(/^\s*(?:ember:|\*\*ember:\*\*|\*\*ember\*\*:)\s*(?=\S)/i, "");
-  const whole = answerIn(answer);
-  return fits(whole) ? whole : cutToFit(answer);
+  const whole = answerIn(answer, sources);
+  return fits(whole) ? whole : cutToFit(answer, sources);
 }
 
-/** The answer `text`, in Markdown, makes: its rich text, a card of the web pictures it shows, and its first web link. */
-function answerIn(text: string): Answer {
+/**
+ * The answer `text`, in Markdown, makes, followed by the `sources` it came from that it doesn't link to
+ * itself: its rich text, a card of the web pictures it shows, and its first web link, which is the
+ * answer's, not a source's.
+ */
+function answerIn(text: string, sources: readonly Source[] = []): Answer {
+  const { images, links } = webPartsOf(text);
+  const cards: Card[] = images.length === 0 ? [] : [{ source: "blocks", parts: images.map((image) => ({ kind: "image", image })) }];
+  return { markup: `${markdownHtml(text)}${sourcesHtml(sources, links)}`, cards, firstLink: links[0] ?? null };
+}
+
+/** The web pictures Markdown `text` shows, and the web addresses it links to, in order. */
+function webPartsOf(text: string): { images: CardImage[]; links: string[] } {
   const images: CardImage[] = [];
-  let firstLink: string | null = null;
+  const links: string[] = [];
   markdown.walkTokens(markdown.lexer(text), (token) => {
     if (token.type === "image") {
       const url = webAddress(decodeHTMLStrict(token.href));
       if (url) images.push({ url, alt: decodeHTMLStrict(token.text) });
     } else if (token.type === "link") {
       // As `markdownHtml` reads them: an autolink's address is its text, with no character references.
-      firstLink ??= webAddress(token.autolink ? token.href : decodeHTMLStrict(token.href));
+      const url = webAddress(token.autolink ? token.href : decodeHTMLStrict(token.href));
+      if (url) links.push(url);
     }
   });
-  const cards: Card[] = images.length === 0 ? [] : [{ source: "blocks", parts: images.map((image) => ({ kind: "image", image })) }];
-  return { markup: markdownHtml(text), cards, firstLink };
+  return { images, links };
+}
+
+/**
+ * The markup naming `sources`, the pages an answer that used the web came from, as Anthropic asks of
+ * answers from its searches: a line after the answer linking to each, by its page's title, or its host
+ * without one, but for those the answer links to itself, `linked`, and those whose address is too long
+ * to name in a message, or "" when there's none left to name.
+ */
+function sourcesHtml(sources: readonly Source[], linked: readonly string[]): string {
+  const links = sources.flatMap(({ url, title }) => {
+    const address = webAddress(url);
+    if (address === null || linked.includes(address)) return [];
+    const words = title.replace(/\s+/g, " ").trim();
+    const shown = words.length > MAX_SOURCE_TITLE_LENGTH ? `${words.slice(0, MAX_SOURCE_TITLE_LENGTH - 1).trimEnd()}…` : words;
+    const link = anchor(address, escapeText(shown || new URL(address).host));
+    return link.length > MAX_SOURCE_LINK_LENGTH ? [] : [link];
+  });
+  return links.length > 0 ? `<p>Sources: ${links.join(", ")}</p>` : "";
 }
 
 /** `address` as a web address, as a link to it goes, or null when it isn't one. */
@@ -168,20 +250,21 @@ function fits({ markup, cards }: Answer): boolean {
 }
 
 /**
- * The answer as much of `text` makes as fits in a message: its first lines, or the start of its first
- * line when even that doesn't fit, ending with an ellipsis where it's cut. Its Markdown can show more
- * than it's written in, as a numbered list counts up, or a picture's address shows for each reference to
- * it, so each cut is measured as it shows.
+ * The answer as much of `text` makes as fits in a message with the `sources` it came from after it: its
+ * first lines, or the start of its first line when even that doesn't fit, ending with an ellipsis where
+ * it's cut. Its Markdown can show more than it's written in, as a numbered list counts up, or a
+ * picture's address shows for each reference to it, and a source whose link the cut leaves out is
+ * named after it, so each cut is measured as it shows.
  */
-function cutToFit(text: string): Answer {
-  const cutFits = (length: number) => fits(cutAt(text, length));
+function cutToFit(text: string, sources: readonly Source[]): Answer {
+  const cutFits = (length: number) => fits(cutAt(text, length, sources));
   const lineEnds = Array.from(text.matchAll(/\n/g), ({ index }) => index);
   const lines = largest(lineEnds.length, (count) => cutFits(lineEnds[count - 1]!));
-  return cutAt(text, lines > 0 ? lineEnds[lines - 1]! : largest(lineEnds[0] ?? text.length, cutFits));
+  return cutAt(text, lines > 0 ? lineEnds[lines - 1]! : largest(lineEnds[0] ?? text.length, cutFits), sources);
 }
 
-/** The answer `text`'s first `length` characters make, ending with an ellipsis to say it's cut. */
-const cutAt = (text: string, length: number) => answerIn(`${text.slice(0, length).trimEnd()}\n\n…`);
+/** The answer `text`'s first `length` characters make, ending with an ellipsis to say it's cut, and then the `sources` they don't link to. */
+const cutAt = (text: string, length: number, sources: readonly Source[]) => answerIn(`${text.slice(0, length).trimEnd()}\n\n…`, sources);
 
 /** The largest count from 0 to `most` that `holds` is true of, as it is of every count below one it's true of. */
 function largest(most: number, holds: (count: number) => boolean): number {
@@ -203,7 +286,7 @@ export function previewAttachment({ url, image, title, description }: LinkPrevie
 /** Where administrators set Ember AI up, as @ember's notes name it. */
 const SETTINGS = "AI assistant in community settings";
 
-/** Where each person picks how much @ember thinks and writes for them, as its notes name it. */
+/** Where each person picks how much @ember thinks and writes for them, and the model it answers them with, as its notes name it. */
 const YOUR_LEVELS = "Ember AI on your profile";
 
 /** What @ember says when it can't answer, for each reason it can't, and while its API token doesn't open. */
@@ -218,4 +301,10 @@ export const NOTES: Record<RefusalReason | "unopened token", string> = {
   nothing: "I couldn't answer: my model answered with nothing. Try asking again.",
   "out of room": `I couldn't answer: my model thought for as long as it may before it wrote anything. Try asking again, or choose less Thinking under ${YOUR_LEVELS}.`,
   "unopened token": `I can't answer right now: Ember AI's API token no longer opens here. An administrator can set it up again under ${SETTINGS}.`,
+};
+
+/** What @ember says instead, when it can't answer with the model whoever asked picked, for the reasons they can do something about. */
+export const PICKED_MODEL_NOTES: Partial<Record<RefusalReason, string>> = {
+  credits: `I can't answer right now: the AI Gateway credits that pay for the model you picked have run out. An administrator can top them up in AI Gateway, or you can pick another model under ${YOUR_LEVELS}.`,
+  model: `I can't answer right now: AI Gateway didn't take my question for the model you picked. Pick another model under ${YOUR_LEVELS}.`,
 };

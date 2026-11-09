@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState, type FormEvent } from "react";
-import { MAX_USER_NAME_LENGTH, type Me, type UserId } from "@ember/protocol";
-import { BOTS_FORBIDDEN, MAX_WEBHOOK_URL_LENGTH, type BotChanges, type BotSettings } from "@ember/protocol/bots";
+import { MAX_USER_NAME_LENGTH, type Me, type RoomId, type UserId } from "@ember/protocol";
+import { BOTS_FORBIDDEN, MAX_WEBHOOK_URL_LENGTH, type Bot, type BotChanges, type BotSettings } from "@ember/protocol/bots";
 import { AUTH_FORM } from "@/components/auth-page";
 import defaultBotAvatar from "@/components/default-bot-avatar.svg";
 import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
@@ -11,7 +11,8 @@ import { useMounted } from "@/hooks/use-mounted";
 import { BOTS_PATH, navigate } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
 import { changeBot, createBot, deleteBot, fetchBot, isSignedOut, resetBotKey } from "@/lib/api";
-import { useAdministratorsOnly } from "./bots-page";
+import { cn } from "@/lib/utils";
+import { PostingCommands, useAdministratorsOnly } from "./bots-page";
 import { DeleteButton, isMissing, NEGATIVE_BUTTON } from "./room-settings-page";
 import { PageHeading, Panel, SettingsPage } from "./settings-page";
 
@@ -85,6 +86,7 @@ export function NewBotPage({ me, onFailed }: { me: Me; onFailed: (error: unknown
       <Panel>
         <BotForm
           avatar={defaultBotAvatar}
+          saved={null}
           photo={photo}
           fields={fields}
           onChange={setFields}
@@ -149,6 +151,7 @@ export function BotSettingsPage({ botId, onMissing, onFailed }: SettingsProps) {
           <>
             <BotForm
               avatar={bot.avatarUrl}
+              saved={bot}
               photo={photo}
               fields={fields}
               onChange={setFields}
@@ -173,6 +176,8 @@ export function BotSettingsPage({ botId, onMissing, onFailed }: SettingsProps) {
 interface FormProps {
   /** The bot's avatar as it is: its own, or Campfire's default bot picture, which the Worker serves for a bot without one. */
   avatar: string;
+  /** The bot as it's saved, whose key and rooms make the addresses it posts at, or null for one not yet added. */
+  saved: Pick<Bot, "key" | "rooms"> | null;
   /** The picture chosen to be its avatar, which saves with the form. */
   photo: PhotoChoice;
   fields: Fields;
@@ -182,11 +187,22 @@ interface FormProps {
   onSave: () => void;
 }
 
+/** A note in one of the form's cards, as the workspace settings' cards have them. */
+const NOTE = "text-[0.8em] text-muted-foreground max-md:text-[12px]";
+
+/** One of the form's cards, Incoming and Outgoing, as the workspace settings' cards are. */
+const CARD = "flex min-w-0 flex-col gap-4 rounded-[10px] border bg-surface px-[2ch] py-4 text-start max-md:px-3";
+
+/** A menu in a field, as the workspace settings' menus are. */
+const SELECT = cn("w-full min-w-0 border outline-none dark:bg-input/30", FIELD_INPUT);
+
 /**
- * The bot form: Chat bot setup, the bot's avatar, its name and its webhook URL, each with a translation
- * button, and Save changes, which saves a picture chosen for its avatar too.
+ * The bot form: Chat bot setup, the bot's avatar and name, then the bot's two ways of talking, Incoming,
+ * the addresses its rooms give it to post at, and Outgoing, the webhook URL Ember sends what people say
+ * to it, and Save changes, which saves a picture chosen for its avatar too. The name and the webhook URL
+ * have translation buttons.
  */
-function BotForm({ avatar, photo, fields, onChange, saving, onSave }: FormProps) {
+function BotForm({ avatar, saved, photo, fields, onChange, saving, onSave }: FormProps) {
   const save = (event: FormEvent) => {
     event.preventDefault();
     if (!saving) onSave();
@@ -194,7 +210,7 @@ function BotForm({ avatar, photo, fields, onChange, saving, onSave }: FormProps)
 
   return (
     <form onSubmit={save} className={AUTH_FORM}>
-      <PageHeading title="Chat bot setup">Connect a bot to your workspace and choose where updates are delivered.</PageHeading>
+      <PageHeading title="Chat bot setup">Connect another app or service to your workspace as a bot.</PageHeading>
       <AvatarField src={avatar} photo={photo} disabled={saving} />
       <Field id="user_name" label="Bot name" translation="bot_name">
         <Input
@@ -210,19 +226,74 @@ function BotForm({ avatar, photo, fields, onChange, saving, onSave }: FormProps)
           className={FIELD_INPUT}
         />
       </Field>
-      <Field id="user_webhook_url" label="Webhook URL" translation="webhook_url">
-        <Input
-          id="user_webhook_url"
-          type="url"
-          placeholder="Webhook URL"
-          maxLength={MAX_WEBHOOK_URL_LENGTH}
-          value={fields.webhookUrl}
-          onChange={(event) => onChange({ ...fields, webhookUrl: event.target.value })}
-          className={FIELD_INPUT}
-        />
-      </Field>
+      <Incoming saved={saved} />
+      <section aria-labelledby="bot-outgoing-heading" className={CARD}>
+        <div>
+          <h2 id="bot-outgoing-heading" className="text-base font-semibold">
+            Outgoing
+          </h2>
+          <p id="bot-outgoing-description" className={NOTE}>
+            Optional. Ember sends every message that @mentions the bot or is sent to it in a DM to this webhook URL, then posts whatever it answers within 30 seconds.
+          </p>
+        </div>
+        <Field id="user_webhook_url" label="Webhook URL" translation="webhook_url">
+          <Input
+            id="user_webhook_url"
+            type="url"
+            placeholder="Webhook URL"
+            maxLength={MAX_WEBHOOK_URL_LENGTH}
+            aria-describedby="bot-outgoing-description"
+            value={fields.webhookUrl}
+            onChange={(event) => onChange({ ...fields, webhookUrl: event.target.value })}
+            className={FIELD_INPUT}
+          />
+        </Field>
+      </section>
       <SubmitButton disabled={saving}>Save changes</SubmitButton>
     </form>
+  );
+}
+
+/**
+ * The form's Incoming card: a menu of the bot's rooms, and the commands that post to the one chosen as the
+ * bot, as the bots page gives them for each, or in their place, that they come once the bot is added,
+ * which puts it in every open room, or that a bot in no rooms has none. The menu keeps a bot in many
+ * rooms from pushing Outgoing out of sight.
+ */
+function Incoming({ saved }: { saved: FormProps["saved"] }) {
+  const [chosen, choose] = useState<RoomId | null>(null);
+  const room = saved?.rooms.find(({ id }) => id === chosen) ?? saved?.rooms[0];
+  return (
+    <section aria-labelledby="bot-incoming-heading" className={CARD}>
+      <div>
+        <h2 id="bot-incoming-heading" className="text-base font-semibold">
+          Incoming
+        </h2>
+        <p className={NOTE}>Apps post in a room as the bot at two addresses the room gives it, one for text or a file and one that takes a Slack incoming webhook's payload.</p>
+      </div>
+      {saved && room ? (
+        <>
+          <div className="max-w-[20em]">
+            <Field id="bot_room" label="Room">
+              <select id="bot_room" value={room.id} onChange={(event) => choose(event.target.value as RoomId)} className={SELECT}>
+                {saved.rooms.map(({ id, name }) => (
+                  <option key={id} value={id}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+          <div role="group" aria-label={room.name} className="flex min-w-0 flex-col gap-4">
+            <PostingCommands room={room} botKey={saved.key} />
+          </div>
+        </>
+      ) : (
+        <p className={cn(NOTE, "rounded-[10px] border border-dashed border-muted-foreground px-[1ch] py-4 text-center")}>
+          {saved ? "It isn't in any rooms, so it has no addresses yet." : "Each room's addresses appear once you save the bot, which puts it in every open room."}
+        </p>
+      )}
+    </section>
   );
 }
 

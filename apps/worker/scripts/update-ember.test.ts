@@ -122,15 +122,15 @@ function releaseNext(repo: string): void {
 
 /**
  * A copy as Deploy to Cloudflare makes one: a new repository whose one commit, on October 6th, holds
- * Ember's main of the 5th, with the Worker and bucket named as the deployer named them.
+ * Ember's main of the 5th, with the Worker and bucket named as the deployer named them; or, on `date`,
+ * Ember as it was at `made`.
  */
-function deployedCopy(ember: string, settings = wrangler("my-chat", "my-files")): string {
+function deployedCopy(ember: string, settings = wrangler("my-chat", "my-files"), { made = "copied", date = "2026-10-06T09:00:00Z" } = {}): string {
   const copy = path.join(dir, "copy");
   mkdirSync(copy);
   git(copy, ["init", "--quiet"]);
-  const made = "copied";
   const files = Object.fromEntries(git(ember, ["ls-tree", "-r", "--name-only", made]).split("\n").map((file) => [file, git(ember, ["show", `${made}:${file}`]) + "\n"]));
-  commit(copy, "2026-10-06T09:00:00Z", { ...files, "wrangler.jsonc": settings }, "Initial commit");
+  commit(copy, date, { ...files, "wrangler.jsonc": settings }, "Initial commit");
   return copy;
 }
 
@@ -248,6 +248,68 @@ describe("updating a copy made with Deploy to Cloudflare", () => {
     expect(status, output).toBe(0);
     expect(output).not.toContain("conflict markers");
     expect(show(copy, "update-ember/v0.2.1", "wrangler.jsonc")).toBe(wrangler("my-chat", "my-files", "2026-10-10").replace("// The Worker.", "// The Worker, named.").replace("// Its files.", "// Its files, named.").trim());
+  });
+
+  it("keeps the preview bucket Deploy to Cloudflare adds after the bucket's name, as the button writes it, where Ember changes the lines beside them", () => {
+    const repo = ember();
+    const commented = wrangler("ember", "ember", "2026-10-10").replace("// The Worker.", "// The Worker, named.").replace("// Its files.", "// Its files, named.");
+    commit(repo, "2026-10-11T12:00:00Z", { "wrangler.jsonc": commented, "apps/worker/package.json": '{ "version": "0.2.1" }\n' });
+    git(repo, ["tag", "v0.2.1"]);
+    const asDeployed = (settings: string) => settings.replace('"name": "ember"', '"name": "my-chat"').replace('"bucket_name": "ember"', '"bucket_name": "my-files","preview_bucket_name": "my-files"');
+    const copy = deployedCopy(repo, asDeployed(wrangler("ember", "ember")));
+    const { status, output } = update(copy, repo);
+    expect(status, output).toBe(0);
+    expect(output).not.toContain("conflict");
+    expect(show(copy, "update-ember/v0.2.1", "wrangler.jsonc")).toBe(asDeployed(commented).trim());
+  });
+
+  it("keeps the copy's D1 database, with the id Deploy to Cloudflare adds after its name, and where its messages live, where Ember changes the lines beside them", () => {
+    const repo = ember();
+    /** `settings` with messages kept on DO SQLite and a D1 database bound for D1, under `comment`. */
+    const onD1 = (settings: string, comment: string) =>
+      settings.replace(
+        "  // Its files.",
+        `  "vars": { "STORAGE_BACKEND": "do-sqlite" },\n  // ${comment}\n  "d1_databases": [{ "binding": "DB", "database_name": "ember", "migrations_dir": "migrations" }],\n  // Its files.`,
+      );
+    // v0.2.1 binds the database, and the copy is made from it; v0.2.2 changes the comment between the copy's choices.
+    const bound = onD1(wrangler("ember", "ember", "2026-10-10"), "Its messages, on D1.");
+    commit(repo, "2026-10-11T12:00:00Z", { "wrangler.jsonc": bound, "apps/worker/package.json": '{ "version": "0.2.1" }\n' });
+    git(repo, ["tag", "v0.2.1"]);
+    const commented = onD1(wrangler("ember", "ember", "2026-10-10"), "Its messages, when STORAGE_BACKEND is d1.");
+    commit(repo, "2026-10-12T12:00:00Z", { "wrangler.jsonc": commented, "apps/worker/package.json": '{ "version": "0.2.2" }\n' });
+    git(repo, ["tag", "v0.2.2"]);
+    const asDeployed = (settings: string) =>
+      settings
+        .replace('"name": "ember"', '"name": "my-chat"')
+        .replace('"STORAGE_BACKEND": "do-sqlite"', '"STORAGE_BACKEND": "d1"')
+        .replace('"database_name": "ember"', '"database_name": "my-messages","database_id": "0f9e8d7c-6b5a-4f3e-9d2c-1b0a98765432"');
+    const copy = deployedCopy(repo, asDeployed(bound), { made: "v0.2.1", date: "2026-10-11T18:00:00Z" });
+    const { status, output } = update(copy, repo);
+    expect(status, output).toBe(0);
+    expect(output).not.toContain("conflict");
+    expect(show(copy, "update-ember/v0.2.2", "wrangler.jsonc")).toBe(asDeployed(commented).trim());
+  });
+
+  it("gives a copy made before Ember bound a D1 database Ember's, and keeps where the copy's messages live", () => {
+    const repo = ember();
+    const withVars = (settings: string, backend: string) => settings.replace("  // Its files.", `  "vars": { "STORAGE_BACKEND": "${backend}" },\n  // Its files.`);
+    // The copy is made from main on the 5th, with STORAGE_BACKEND as the form had it, and v0.2.1 binds the database.
+    git(repo, ["switch", "--quiet", "copied"]);
+    commit(repo, "2026-10-05T13:00:00Z", { "wrangler.jsonc": withVars(wrangler("ember", "ember"), "do-sqlite") });
+    git(repo, ["branch", "--force", "main"]);
+    git(repo, ["switch", "--quiet", "main"]);
+    git(repo, ["tag", "--delete", "v0.2.0"]);
+    const bound = withVars(wrangler("ember", "ember", "2026-10-10"), "do-sqlite").replace(
+      "  // Its files.",
+      '  "d1_databases": [{ "binding": "DB", "database_name": "ember" }],\n  // Its files.',
+    );
+    commit(repo, "2026-10-11T12:00:00Z", { "wrangler.jsonc": bound, "apps/worker/package.json": '{ "version": "0.2.1" }\n' });
+    git(repo, ["tag", "v0.2.1"]);
+    const copy = deployedCopy(repo, withVars(wrangler("my-chat", "my-files"), "d1"), { made: "main~1", date: "2026-10-06T09:00:00Z" });
+    const { status, output } = update(copy, repo);
+    expect(status, output).toBe(0);
+    expect(output).not.toContain("conflict");
+    expect(show(copy, "update-ember/v0.2.1", "wrangler.jsonc")).toBe(bound.replace('"name": "ember"', '"name": "my-chat"').replace('"bucket_name": "ember"', '"bucket_name": "my-files"').replace('"do-sqlite"', '"d1"').trim());
   });
 
   it("keeps the copy's bucket's name with its binding where Ember adds a bucket before it", () => {

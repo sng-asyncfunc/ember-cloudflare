@@ -19,6 +19,9 @@ const AUTO_EMAIL_RE = /[a-zA-Z0-9_.!#$%+-]\.?[a-zA-Z0-9_.!#$%&'*/=?^`{|}~+-]*@[a
 /** `AUTO_EMAIL_LOCAL_RE`, the lookbehind: no address starts right after one of these. */
 const EMAIL_LOCAL_CHAR = /[a-zA-Z0-9_.!#$%&'*/=?^`{|}~+-]/;
 
+/** An address `autoLink` links, anywhere: one `AUTO_LINK_RE` matches, or an email address where one can start. */
+const LINKABLE = new RegExp(`${AUTO_LINK_RE.source}|(?<!${EMAIL_LOCAL_CHAR.source})${AUTO_EMAIL_RE.source}`, "i");
+
 /** `AUTO_LINK_CRE[2]`, `/<a\b.*?>/i`, tried at a `<`; Ruby's `.` stops at a newline. */
 const OPEN_ANCHOR = /<a\b[^\n]*?>/iy;
 
@@ -27,6 +30,14 @@ const WORD_CHAR = /^[\p{Alphabetic}\p{M}\p{Nd}\p{Pc}\p{Join_Control}]$/u;
 
 /** Closing brackets that may end an address when the address opened them. */
 const OPENING_BRACKETS: Record<string, string> = { "]": "[", ")": "(", "}": "{" };
+
+/**
+ * Whether plain text has an address in it that `autoLink` links, which a message shows as a link: one with
+ * a scheme it knows, a www. one, or an email address.
+ */
+export function hasLinkable(text: string): boolean {
+  return LINKABLE.test(text);
+}
 
 /**
  * `auto_link(html, html: { target: "_blank" })`, without the sanitizing it starts with: `html`

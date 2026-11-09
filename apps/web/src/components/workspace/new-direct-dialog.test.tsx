@@ -96,6 +96,16 @@ describe("Where bots show up", () => {
     await user.type(search(), "bot");
     expect(listed()).toEqual(["Build Bot"]);
   });
+
+  it("badges @ember as an agent after its name, and picks it by that name", async () => {
+    const ember = { ...person("ember", "Ember"), role: "bot" as const };
+    const { user } = showDialog({ people: [...everyone, ember] });
+    await user.type(search(), "em");
+    expect(listed()).toEqual(["Ember Agent"]);
+    expect(within(option("Ember Agent")).getByText("Agent")).toHaveAttribute("data-slot", "badge");
+    await user.click(option("Ember Agent"));
+    expect(chips()).toEqual(["Ember"]);
+  });
 });
 
 describe("New direct message dialog", () => {

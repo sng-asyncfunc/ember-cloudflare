@@ -16,7 +16,7 @@ import {
   SEARCHES_PATH,
   useBackPath,
   useJoinRoute,
-  useQueryParam,
+  useQuery,
   useRoute,
   useVisit,
   type LeaveGuard,
@@ -206,15 +206,18 @@ describe("Edit your profile", () => {
 });
 
 describe("Search page", () => {
+  /** What's searched for, as the address of the page shown has it. */
+  const useSearched = () => new URLSearchParams(useQuery()).get("q");
+
   it("has search at /searches, reading what's searched for from its query string as the address changes", async () => {
-    history.replaceState(null, "", "/searches?q=hello++world");
-    const { result } = renderHook(() => ({ route: useRoute(), q: useQueryParam("q") }));
-    expect(result.current).toEqual({ route: { page: "search" }, q: "hello  world" });
+    history.replaceState(null, "", "/searches?q=hello++world&in=general&has=link");
+    const { result } = renderHook(() => ({ route: useRoute(), query: useQuery(), q: useSearched() }));
+    expect(result.current).toEqual({ route: { page: "search" }, query: "?q=hello++world&in=general&has=link", q: "hello  world" });
     act(() => navigate("/searches?q=eel"));
     expect(result.current.q).toBe("eel");
     expect(location.search).toBe("?q=eel");
     act(() => navigate(SEARCHES_PATH));
-    expect(result.current).toEqual({ route: { page: "search" }, q: null });
+    expect(result.current).toEqual({ route: { page: "search" }, query: "", q: null });
 
     act(() => history.back());
     await waitFor(() => expect(result.current.q).toBe("eel"));
@@ -222,8 +225,8 @@ describe("Search page", () => {
 
   it("reads any search back from its address as it was searched for", () => {
     for (const query of ["hello  world", "café_1 日本", " eel ", "\u{200d}", ""]) {
-      history.replaceState(null, "", searchPath(query));
-      const { result, unmount } = renderHook(() => useQueryParam("q"));
+      history.replaceState(null, "", searchPath({ q: query }));
+      const { result, unmount } = renderHook(useSearched);
       expect(result.current, query).toBe(query);
       unmount();
     }
@@ -231,7 +234,7 @@ describe("Search page", () => {
 
   it("goes to another search as another page, which Back leaves, but not to the search shown", async () => {
     history.replaceState(null, "", "/searches?q=eel");
-    const { result } = renderHook(() => useQueryParam("q"));
+    const { result } = renderHook(useSearched);
     act(() => navigate("/searches?q=eel"));
     expect(history.state).toBeNull();
     act(() => navigate(SEARCHES_PATH));

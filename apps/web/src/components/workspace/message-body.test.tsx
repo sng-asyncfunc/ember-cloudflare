@@ -5,7 +5,9 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PeopleContext, type People } from "@/hooks/use-directory";
+import { marksFor } from "@/lib/search";
 import { MessageBody } from "./message-body";
+import { SearchMarks } from "./search-marks";
 
 afterEach(() => history.replaceState(null, "", "/"));
 
@@ -228,5 +230,50 @@ describe("Link previews in messages", () => {
     const content = show(`<p><a href="https://basecamp.com/">https://basecamp.com/</a></p>${preview(basecamp)}`, undefined, "https://basecamp.com/");
     expect(content.querySelector("p")).toBeNull();
     expect(within(content).getByRole("link", { name: "Basecamp" })).toBeInTheDocument();
+  });
+});
+
+describe("Search results mark what a search matched", () => {
+  /** A stored body as a search's results show it, marking `words`. */
+  function showMarked(html: string, words: string[]) {
+    const { container } = render(
+      <SearchMarks value={marksFor(words)}>
+        <MessageBody nodes={shown(html)} mentions={[]} />
+      </SearchMarks>,
+    );
+    return container.querySelector<HTMLElement>(".message-content")!;
+  }
+
+  it("marks each word it matched, wherever it is in the text, and leaves the text as it was", () => {
+    const content = showMarked("<p>Deploying the <strong>deploy</strong> now, not the redeploy</p><ul><li>deploy again</li></ul>", ["deploy", "Deploying"]);
+    expect([...content.querySelectorAll("mark[data-search-match]")].map((mark) => mark.textContent)).toEqual(["Deploying", "deploy", "deploy"]);
+    expect(content.textContent).toBe("Deploying the deploy now, not the redeploydeploy again");
+    expect(content.querySelector("strong mark")).toHaveTextContent("deploy");
+  });
+
+  it("marks words in a link's text, which stays a link", () => {
+    const content = showMarked('<p>See <a href="https://example.com/launch">the launch notes</a></p>', ["launch"]);
+    expect(within(content).getByRole("link", { name: "the launch notes" }).querySelector("mark")).toHaveTextContent("launch");
+  });
+
+  it("marks a word in each part of it that formatting splits, but not a part of a longer word, nor words across blocks", () => {
+    const content = showMarked("<p><strong>de</strong>ploy, <em>re</em>deploy <span>dep</span><s>loy</s></p><p>de</p><p>ploy</p>", ["deploy"]);
+    expect([...content.querySelectorAll("mark[data-search-match]")].map((mark) => mark.textContent)).toEqual(["de", "ploy", "dep", "loy"]);
+    expect(content.querySelector("strong mark")).toHaveTextContent("de");
+    expect(content.textContent).toBe("deploy, redeploy deploydeploy");
+  });
+
+  it("keeps the words it matched in a code block marked once the code is highlighted", async () => {
+    const content = showMarked('<pre data-language="javascript">const deploy = "deploy now";</pre>', ["deploy"]);
+    await highlighted(content);
+    expect([...content.querySelectorAll("mark[data-search-match]")].map((mark) => mark.textContent)).toEqual(["deploy", "deploy"]);
+    expect(content.querySelector(".hljs-string mark")).toHaveTextContent("deploy");
+    expect(content.textContent).toBe('const deploy = "deploy now";');
+  });
+
+  it("marks nothing when the search had no words, nor Lexxy's highlights as matches", () => {
+    const content = showMarked("<p>Deploy <mark>soon</mark></p>", []);
+    expect(content.querySelectorAll("mark")).toHaveLength(1);
+    expect(content.querySelector("mark[data-search-match]")).toBeNull();
   });
 });

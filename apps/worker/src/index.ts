@@ -1,4 +1,5 @@
 import {
+  ASSISTANT_ID,
   AVATAR_PATH,
   CloseCode,
   CURRENT_PASSWORD_NEEDED,
@@ -88,7 +89,19 @@ import {
   tokenDigest,
 } from "./auth";
 import { directoryOf } from "./avatar-tokens";
-import { changeAnswerLevels, changeAssistantMost, forgetAssistant, saveAssistant } from "./assistant/settings";
+import {
+  addAssistantModel,
+  changeAssistantAvatar,
+  changeAssistantSettings,
+  changeWebSearch,
+  changeYourAssistant,
+  deployedAccountIdOf,
+  forgetAssistant,
+  listAssistantModels,
+  removeAssistantAvatar,
+  removeAssistantModel,
+  saveAssistant,
+} from "./assistant/settings";
 import { avatarTokenOf, showAvatar, storeAvatar } from "./avatars";
 import type { BanProblem } from "./bans";
 import { BodyTooLarge, jsonBodyOf } from "./bodies";
@@ -123,7 +136,7 @@ import { urlOf } from "./request-url";
 import { MAX_ADDRESS_LENGTH } from "./revocations";
 import { clearSearches, recordSearch, searchMessages } from "./searches";
 import { isOnboardedToEmailSending } from "./sending-domain";
-import { firstRun, isSetupPath, setupAccessOf, setupPage, setupPlaceholdersOf } from "./setup";
+import { checkSetup, firstRun, isSetupPath, setupAccessOf, setupPage, setupPlaceholdersOf } from "./setup";
 import { closedAtOnce } from "./sockets";
 import { newTransferId, transferPage, transferSession } from "./transfers";
 import { refusalOfTurnstileKeys, turnstileCheckPage, turnstileKeysOf } from "./turnstile";
@@ -257,16 +270,21 @@ async function me(request: Request, env: Env): Promise<Response> {
 /**
  * Workspace settings, which anyone signed in may see, read-only unless they're an administrator, with
  * the Memberful site whose members can sign in, once the deployment has its keys, whether it hears the
- * site's webhooks, and where Turnstile's keys come from, the deployment's taking the place of any an
- * administrator gave. They hold the join code, which no cache should keep, as the sidebar's invitation
- * does.
+ * site's webhooks, where Turnstile's keys come from, the deployment's taking the place of any an
+ * administrator gave, and, for administrators, the Cloudflare account Ember is deployed to. They hold
+ * the join code, which no cache should keep, as the sidebar's invitation does.
  */
 async function workspaceSettings(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
   const settings = credentials && (await workspace(env).workspaceSettings(credentials));
   if (!settings) return problem(401, "Not signed in");
   if (settings === "not set up") return problem(404, "Ember isn't set up yet");
-  const deployment = { memberfulSite: memberfulKeysOf(env)?.site ?? null, memberfulWebhooks: memberfulWebhooksOf(env) !== null, turnstile: turnstileOf(env, settings.turnstile) };
+  const deployment = {
+    memberfulSite: memberfulKeysOf(env)?.site ?? null,
+    memberfulWebhooks: memberfulWebhooksOf(env) !== null,
+    turnstile: turnstileOf(env, settings.turnstile),
+    cloudflareAccountId: settings.canAdminister ? deployedAccountIdOf(env) : null,
+  };
   return json({ ...settings, ...deployment } satisfies WorkspaceSettings, { headers: { "Cache-Control": "no-store" } });
 }
 
@@ -428,14 +446,14 @@ async function lookUpCustomDomain(request: Request, env: Env): Promise<Response>
 
 /**
  * The release this Ember is, and the newest one GitHub names, for an administrator, as General settings
- * says, telling them when a newer one is out.
+ * says, telling them when a newer one is out: as GitHub last said, or `afresh`, as opening Admin asks.
  */
-async function release(request: Request, env: Env): Promise<Response> {
+async function release(request: Request, env: Env, afresh: boolean): Promise<Response> {
   const credentials = await credentialsOf(request, env);
   const administrator = credentials && (await workspace(env).canAdminister(credentials));
   if (administrator === null) return problem(401, "Not signed in");
   if (!administrator) return problem(403, "Only administrators can change the workspace");
-  return json((await releaseCheck()) satisfies ReleaseCheck, { headers: { "Cache-Control": "no-store" } });
+  return json((await releaseCheck(env, afresh)) satisfies ReleaseCheck, { headers: { "Cache-Control": "no-store" } });
 }
 
 /** The workspace's custom CSS, for the Custom CSS page, which only administrators can open. */
@@ -756,8 +774,8 @@ async function personPage(request: Request, env: Env, pathname: string, userId: 
 
 /**
  * Whom the mentions prompt offers: the first 20 by name of the active people in `room_id`, or anywhere
- * without one, whose names contain `filter` (or `query`), as `<lexxy-prompt-item>`s. A room someone
- * isn't in is 404.
+ * without one, whose names contain `filter` (or `query`), as `<lexxy-prompt-item>`s, with @ember's
+ * badged as an agent's. A room someone isn't in is 404.
  */
 async function mentionable(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -769,7 +787,7 @@ async function mentionable(request: Request, env: Env): Promise<Response> {
   const people = await workspace(env).mentionable(credentials, roomId ?? null, query);
   if (!people) return problem(401, "Not signed in");
   if (people === "not found") return problem(404, ROOM_NOT_FOUND);
-  const items = (await directoryOf(people, env.SESSION_SECRET)).map(mentionPromptItem);
+  const items = (await directoryOf(people, env.SESSION_SECRET)).map((person) => mentionPromptItem({ ...person, agent: person.id === ASSISTANT_ID }));
   return new Response(items.join(""), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
@@ -965,6 +983,7 @@ async function connectToRoom(request: Request, env: Env, roomId: RoomId): Promis
 function apiAction(request: Request, env: Env, pathname: string): (() => Response | Promise<Response>) | null {
   if (pathname === "/api/bootstrap" && request.method === "GET") return () => bootstrap(request, env);
   if (pathname === "/api/first_run" && request.method === "POST") return () => firstRun(request, env);
+  if (pathname === "/api/first_run/check" && request.method === "POST") return () => checkSetup(request, env);
   if (pathname === "/api/session" && request.method === "POST") return () => signIn(request, env);
   if (pathname === "/api/session" && request.method === "DELETE") return () => endSession(request, env);
   if (pathname === "/api/session/transfers" && request.method === "POST") return () => transferSession(request, env);
@@ -980,12 +999,19 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/account/turnstile_keys" && request.method === "DELETE") return () => forgetTurnstileKeys(request, env);
   if (pathname === "/api/account/assistant" && request.method === "PUT") return () => saveAssistant(request, env);
   if (pathname === "/api/account/assistant" && request.method === "DELETE") return () => forgetAssistant(request, env);
-  if (pathname === "/api/account/assistant" && request.method === "PATCH") return () => changeAssistantMost(request, env);
+  if (pathname === "/api/account/assistant" && request.method === "PATCH") return () => changeAssistantSettings(request, env);
+  if (pathname === "/api/account/assistant/catalog" && request.method === "POST") return () => listAssistantModels(request, env);
+  if (pathname === "/api/account/assistant/models" && request.method === "POST") return () => addAssistantModel(request, env);
+  if (pathname === "/api/account/assistant/models" && request.method === "DELETE") return () => removeAssistantModel(request, env);
+  if (pathname === "/api/account/assistant/web_search" && request.method === "PUT") return () => changeWebSearch(request, env);
+  if (pathname === "/api/account/assistant/avatar" && request.method === "PUT") return () => changeAssistantAvatar(request, env);
+  if (pathname === "/api/account/assistant/avatar" && request.method === "DELETE") return () => removeAssistantAvatar(request, env);
   if (pathname === "/api/account/custom_domain_checks" && request.method === "POST") return () => checkCustomDomain(request, env);
   if (pathname === "/api/account/custom_domain_lookups" && request.method === "POST") return () => lookUpCustomDomain(request, env);
   if (pathname === LOGO_PATH && request.method === "PUT") return () => changeLogo(request, env);
   if (pathname === LOGO_PATH && request.method === "DELETE") return () => removeLogo(request, env);
-  if (pathname === "/api/account/release" && request.method === "GET") return () => release(request, env);
+  if (pathname === "/api/account/release" && request.method === "GET") return () => release(request, env, false);
+  if (pathname === "/api/account/release_checks" && request.method === "POST") return () => release(request, env, true);
   if (pathname === "/api/account/custom_styles" && request.method === "GET") return () => customStyles(request, env);
   if (pathname === "/api/account/custom_styles" && request.method === "PATCH") return () => changeCustomStyles(request, env);
   if (pathname === "/api/account/room_order" && request.method === "PUT") return () => setSharedOrder(request, env);
@@ -1009,7 +1035,7 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/sidebar/order" && request.method === "PUT") return () => setFavoriteOrder(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "GET") return () => profile(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "PATCH") return () => changeProfile(request, env);
-  if (pathname === "/api/users/me/assistant" && request.method === "PATCH") return () => changeAnswerLevels(request, env);
+  if (pathname === "/api/users/me/assistant" && request.method === "PATCH") return () => changeYourAssistant(request, env);
   if (pathname === MEMBERFUL_CONNECTIONS_PATH && request.method === "POST") return () => connectMemberful(request, env);
   if (pathname === AVATAR_PATH && request.method === "PUT") return () => changeAvatar(request, env);
   if (pathname === AVATAR_PATH && request.method === "DELETE") return () => removeAvatar(request, env);
@@ -1139,14 +1165,14 @@ async function route(request: Request, env: Env, pathname: string): Promise<Resp
 
 /**
  * What an exception answers: JSON from the API and the bot API, and Campfire's 500 page otherwise.
- * Setup's form holds the first administrator's password, and recovery its token and a new password, so
- * there the log says only that the request failed, and a bot's key is filtered out of its address, as
- * Campfire's log filters it.
+ * Setup's form holds the first administrator's password, and its check the setup password, and recovery
+ * its token and a new password, so there the log says only that the request failed, and a bot's key is
+ * filtered out of its address, as Campfire's log filters it.
  */
 function failure(request: Request, pathname: string, error: unknown): Response {
   // A JSON body over the limit is refused as too large, rather than failed on.
   if (error instanceof BodyTooLarge) return problem(413, error.message);
-  const holdsSecrets = pathname === "/api/first_run" || pathname === RECOVERY_PATH;
+  const holdsSecrets = pathname === "/api/first_run" || pathname === "/api/first_run/check" || pathname === RECOVERY_PATH;
   console.error(`${request.method} ${withoutBotKeys(pathname)} failed:`, holdsSecrets ? "500 Internal Server Error" : error);
   if (pathname.startsWith("/api/")) return problem(500, "Something went wrong");
   if (isBotPath(pathname)) return exception(500);

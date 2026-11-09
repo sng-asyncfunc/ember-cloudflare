@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import { MAX_PICTURE_REQUEST } from "../src/files/pictures";
 import type { Workspace } from "../src/workspace";
-import { api, apiWith, cookieOf, freshDeploy, openWorkspaceSocket, origin, recordedImage, shown, signIn, workspaceSql, workspaceStub, type Session } from "./support";
+import { api, apiWith, avatarVersionOf, cookieOf, freshDeploy, openWorkspaceSocket, origin, recordedImage, shown, signIn, stopTheClock, workspaceSql, workspaceStub, type Session } from "./support";
 
 // Avatars people upload, setup and sign-up forms take them.
 
@@ -16,7 +16,10 @@ const CACHE_CONTROL = "max-age=1800, public, stale-while-revalidate=604800";
 const LONG_AGO = "2026-01-01T00:00:00.000Z";
 
 beforeEach(freshDeploy);
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 const as = (session: Session | null): Record<string, string> => (session ? { Cookie: session.cookie } : {});
 
@@ -56,6 +59,9 @@ async function uploadMoon(session: Session): Promise<ProfileAnswer> {
 }
 
 const removeAvatar = (session: Session | null) => api(AVATAR_PATH, { method: "DELETE", headers: as(session) });
+
+/** Saves `bio` on the profile of the person `session` signs in. */
+const saveBio = (session: Session, bio: string) => api("/api/users/me/profile", { method: "PATCH", headers: as(session), body: JSON.stringify({ bio }) });
 
 /** Someone as the directory lists them, as `viewer` sees it. */
 async function listed(viewer: Session, userId: UserId): Promise<DirectoryUser> {
@@ -152,6 +158,46 @@ describe("Upload an avatar", () => {
     const now = await listed(grace, ada.user.id);
     expect(await socket.next()).toEqual({ type: "user.updated", user: now });
     expect(new Uint8Array(await (await avatar(now.avatarUrl, grace)).arrayBuffer())).toEqual(recordedImage("moon-avatar.webp"));
+  });
+
+  it("gives each change a later address, even one in the same second as the last, which nothing after takes back, as browsers keep the picture they have at one", async () => {
+    // Joining, uploading a photo, saving the profile, replacing the photo and removing it, all at once.
+    stopTheClock();
+    const ada = await signIn("Ada Lovelace");
+    const initials = (await listed(ada, ada.user.id)).avatarUrl;
+    const { profile: first } = await uploadMoon(ada);
+    const { profile: saved } = (await (await saveBio(ada, "Countess")).json()) as ProfileAnswer;
+    const { profile: second } = await uploadMoon(ada);
+    const { profile: removed } = (await (await removeAvatar(ada)).json()) as ProfileAnswer;
+
+    const pictures = [initials, first.avatarUrl, second.avatarUrl, removed.avatarUrl].map(avatarVersionOf);
+    expect(pictures).toEqual([...pictures].sort((a, b) => a - b));
+    expect(new Set(pictures).size).toBe(4);
+    // The same picture, at the address it had or a later one.
+    expect(avatarVersionOf(saved.avatarUrl)).toBeGreaterThanOrEqual(avatarVersionOf(first.avatarUrl));
+    expect(avatarVersionOf(saved.avatarUrl)).toBeLessThan(avatarVersionOf(second.avatarUrl));
+    expect((await listed(ada, ada.user.id)).avatarUrl).toBe(removed.avatarUrl);
+  });
+
+  it("waits for the next second out of line, holding up nobody else's change", async () => {
+    stopTheClock();
+    const ada = await signIn("Ada Lovelace");
+    const grace = await signIn("Grace Hopper");
+    const initials = (await listed(ada, ada.user.id)).avatarUrl;
+    // Ada's photo comes in the same second as she joined, so it waits, until the test lets it go. It
+    // looks to see, as a promise the Workspace waits for can't be kept from outside it.
+    let held = true;
+    vi.mocked(scheduler.wait).mockImplementationOnce(async (ms) => {
+      while (held) await new Promise((resolve) => setTimeout(resolve, 10));
+      vi.setSystemTime(Date.now() + ms);
+    });
+    const uploading = uploadMoon(ada);
+    await vi.waitFor(() => expect(scheduler.wait).toHaveBeenCalledTimes(1));
+
+    expect((await saveBio(grace, "Rear admiral")).status).toBe(200);
+    held = false;
+    const { profile } = await uploading;
+    expect(avatarVersionOf(profile.avatarUrl)).toBeGreaterThan(avatarVersionOf(initials));
   });
 
   it("keeps any file, serving the initials for one Campfire doesn't resize, whatever it's named", async () => {

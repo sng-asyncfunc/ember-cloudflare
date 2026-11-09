@@ -503,6 +503,15 @@ describe("Group DMs and DM names", () => {
     );
     expect(directRows()[0]).toHaveAccessibleName("Direct message with Grace Hopper");
   });
+
+  it("badges a DM with @ember alone as an agent's after its name, but not a group DM it's in", () => {
+    const ember: User = { id: "ember", name: "Ember" };
+    renderSidebar({ rooms: [direct("d1", [ada!, ember], false, at(2)), direct("d2", [ada!, ember, grace!], false, at(1))] });
+    const [alone, group] = directRows();
+    expect(alone).toHaveAccessibleName("Direct message with Ember Agent");
+    expect(within(alone!).getByText("Agent")).toHaveAttribute("data-slot", "badge");
+    expect(group).toHaveAccessibleName("Direct message with Ember, Grace");
+  });
 });
 
 describe("Conversations sidebar", () => {
@@ -544,6 +553,11 @@ describe("Suggested people", () => {
     expect(suggestionRows()[0]).toHaveAccessibleName("Start a direct message with Linus");
     expect(directRows()[0]!.compareDocumentPosition(suggestionRows()[0]!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect([...suggestionRows()[0]!.querySelectorAll("img")].map((img) => img.getAttribute("class"))).toEqual([expect.stringContaining("size-6")]);
+  });
+
+  it("badges @ember as an agent where it's suggested", () => {
+    renderSidebar({ suggestions: [{ id: "ember", name: "Ember" }, linus!] });
+    expect(suggestionRows().map((row) => row.textContent)).toEqual(["Start a direct message with Ember Agent", "Start a direct message with Linus"]);
   });
 
   it("leaves out the people in your DMs, suggesting one fewer for each, as soon as a DM lists them", () => {

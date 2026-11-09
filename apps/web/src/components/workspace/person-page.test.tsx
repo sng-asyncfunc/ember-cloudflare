@@ -265,6 +265,23 @@ describe("A bot's profile", () => {
     expect(onStartDirect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: bender.id, name: bender.name }));
   });
 
+  it("badges @ember's page as an agent's under its avatar, and no other bot's", async () => {
+    const ember: Person = { ...bender, id: "ember", name: "Ember" };
+    serve(found(ember));
+    showPage(ember);
+    expect(await avatar()).toBeVisible();
+    const badge = screen.getByText("Agent");
+    expect(badge).toHaveAttribute("data-slot", "badge");
+    expect(badge.previousElementSibling).toContainElement(await avatar());
+    expect(directButton("Ember")).toBeVisible();
+    cleanup();
+
+    serve(found(bender));
+    showPage(bender);
+    expect(await avatar()).toBeVisible();
+    expect(screen.queryByText("Agent")).toBeNull();
+  });
+
   it("shows only a deleted bot's avatar and that it's no longer on this account", async () => {
     serve(found({ ...bender, status: "deactivated" }));
     showPage(bender, { me: administrator });

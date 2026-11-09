@@ -16,6 +16,7 @@ import {
   roomSql,
   roomStub,
   settle,
+  sharedD1,
   shown,
   upload,
   workspaceSql,
@@ -83,7 +84,7 @@ const storedFiles = async () => (await files.list({ prefix: "files/" })).objects
 
 /** What `query` finds in room `room`'s tables, of which a room on DO SQLite has none until it's used. */
 async function roomRows<T>(room: RoomId, query: string): Promise<T[]> {
-  const unopened = !(env as { DB?: D1Database }).DB && (await objectSql(roomStub(room), "SELECT 1 FROM sqlite_master WHERE name = 'messages'")).length === 0;
+  const unopened = !sharedD1() && (await objectSql(roomStub(room), "SELECT 1 FROM sqlite_master WHERE name = 'messages'")).length === 0;
   return unopened ? [] : ((await roomSql(room, query, room)) as T[]);
 }
 

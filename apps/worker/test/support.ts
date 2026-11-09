@@ -22,7 +22,7 @@ import {
 } from "@ember/protocol";
 import { applyD1Migrations, reset, runInDurableObject, type D1Migration } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
-import { expect } from "vitest";
+import { expect, vi } from "vitest";
 import { ADDRESS_HEADER, AUTHORIZED_AT_HEADER, BANNED_HEADER, ROOM_HEADER, SESSION_HEADER, USER_HEADER, type ChatRoom } from "../src/chat-room";
 import { toBase64, toBase64url, urlsafeDecode64 } from "../src/encoding";
 import type { Env } from "../src/env";
@@ -55,6 +55,25 @@ export const api = (path: string, init: RequestInit = {}) => exports.default.fet
 export const apiWith = (changes: Partial<Env>, path: string, init: RequestInit<IncomingRequestCfProperties> = {}) =>
   worker.fetch(new Request(new URL(path, origin), fromOwnPages(path, init)), { ...(env as unknown as Env), ...changes });
 
+/**
+ * What Ember AI's settings say of @ember's avatar while it's Ember's flame, as it is until an
+ * administrator uploads one: its address, at whichever version.
+ */
+export const WITH_THE_FLAME = { avatarUrl: expect.stringMatching(/^\/users\/ember\.[\w-]+\/avatar\?v=\d{14}(?:&|$)/) as string, avatar: false };
+
+/** When the owner of the avatar at `avatarUrl` last changed, as its address says (`?v=`), so a later address has a larger one. */
+export const avatarVersionOf = (avatarUrl: string) => Number(new URL(avatarUrl, origin).searchParams.get("v"));
+
+/**
+ * Stops the clock, for the Workspace too, which then moves only as far as anything waits, at once: what
+ * happens next happens in the same second, but for what waits for a later one. `vi.useRealTimers` and
+ * `vi.restoreAllMocks` start it again.
+ */
+export function stopTheClock(): void {
+  vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+  vi.spyOn(scheduler, "wait").mockImplementation(async (ms) => void vi.setSystemTime(Date.now() + ms));
+}
+
 /** One of the recorded images (fixtures/README.md), by its name in fixtures/storage/. */
 export function recordedImage(name: string): Uint8Array {
   const { TEST_RECORDED_IMAGES } = env as unknown as { TEST_RECORDED_IMAGES: Record<string, string> };
@@ -83,8 +102,8 @@ export async function freshDeploy(): Promise<void> {
   // alarm delivers what the last test queued, so it's made again until the Workspace has nobody.
   do {
     await reset();
-    const { DB, TEST_MIGRATIONS } = env as unknown as { DB?: D1Database; TEST_MIGRATIONS: D1Migration[] };
-    if (DB) await applyD1Migrations(DB, TEST_MIGRATIONS);
+    const db = sharedD1();
+    if (db) await applyD1Migrations(db, (env as unknown as { TEST_MIGRATIONS: D1Migration[] }).TEST_MIGRATIONS);
   } while (await anyoneLeft());
   host = undefined;
   forgetNewestRelease();
@@ -232,9 +251,18 @@ export function objectSql(stub: DurableObjectStub, query: string, ...params: Arr
   return runInDurableObject(stub, (_object, state: DurableObjectState) => state.storage.sql.exec(query, ...params).toArray());
 }
 
+/**
+ * The D1 database every object keeps its tables in when this suite runs on D1, or undefined on DO SQLite,
+ * where wrangler.jsonc binds one that nothing uses, as Deploy to Cloudflare's form makes one for every copy.
+ */
+export function sharedD1(): D1Database | undefined {
+  const { STORAGE_BACKEND, DB } = env as unknown as Env;
+  return STORAGE_BACKEND === "d1" ? DB : undefined;
+}
+
 /** Runs SQL against the tables `stub` keeps: in D1 when this suite uses it, else in the object's own storage. */
 async function tablesSql(stub: DurableObjectStub, query: string, ...params: Array<string | number>): Promise<unknown[]> {
-  const db = (env as { DB?: D1Database }).DB;
+  const db = sharedD1();
   if (db) return (await db.prepare(query).bind(...params).all()).results;
   return objectSql(stub, query, ...params);
 }

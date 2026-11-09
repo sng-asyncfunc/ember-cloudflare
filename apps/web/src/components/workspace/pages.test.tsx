@@ -15,7 +15,7 @@ const ANSWERS: Record<string, () => Response> = {
       suggestions: [],
     }),
   "GET /api/users": () => Response.json({ users: [] }),
-  "GET /api/searches": () => Response.json({ query: null, messages: [], rooms: [], recent: [] }),
+  "GET /api/searches?q=": () => Response.json({ search: null, matches: [], next: null, rooms: [], recent: [] }),
   "GET /api/users/me/profile": () => Response.json({ profile: { name: "Ada", emailAddress: "ada@example.com", bio: null } }),
 };
 

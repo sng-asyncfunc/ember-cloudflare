@@ -72,6 +72,10 @@ export default defineConfig({
   build: {
     // Browsers without modulepreload still load everything; they just don't fetch it early.
     modulePreload: { polyfill: false },
+    // The app's script, about 650 kB with React DOM, and the editor's, about 600 kB of Lexxy, which loads
+    // with the first composer, are each one chunk on purpose (see oneAppScript), so only a chunk that grows
+    // past them is worth a warning.
+    chunkSizeWarningLimit: 700,
   },
   server: {
     // `wrangler dev` serves the API, room sockets, web app manifest, QR codes, Turnstile's check page, avatars,

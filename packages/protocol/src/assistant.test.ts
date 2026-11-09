@@ -7,13 +7,20 @@ import {
   ASSISTANT_MODELS,
   DEFAULT_LEVELS,
   isWorkersAiModel,
+  LEVELS_REFUSED,
   MAX_MODEL_LENGTH,
+  MAX_MODEL_NAME_LENGTH,
   MODEL_FORMATS,
+  MODEL_NOT_LISTED,
   MODEL_REFUSED,
   modelName,
+  modelNameOf,
   modelOf,
+  parseAssistantChanges,
+  parseAssistantKeys,
   parseAssistantSetup,
-  parseLevelChanges,
+  parseNewAssistantModel,
+  parseYourAssistantChanges,
   THINKING_LEVELS,
   THINKING_TOKENS,
   TOP_LEVELS,
@@ -31,6 +38,30 @@ describe("Set up Ember AI", () => {
       apiToken: API_TOKEN,
       model: "anthropic/claude-sonnet-5.5",
     });
+  });
+
+  it("takes the model's name as Cloudflare's catalog gives it, and leaves out one that can't be a model's", () => {
+    const setup = { accountId: ACCOUNT_ID, model: "openai/gpt-5.5" };
+    expect(parseAssistantSetup({ ...setup, modelName: " GPT-5.5 " })).toEqual({ ...setup, modelName: "GPT-5.5" });
+    for (const modelName of ["", "  ", 5, "GPT\u2028-5.5", "x".repeat(MAX_MODEL_NAME_LENGTH + 1), "GPT\u202e5.5"]) {
+      expect(parseAssistantSetup({ ...setup, modelName }), JSON.stringify(modelName)).toEqual(setup);
+    }
+    expect(modelNameOf("x".repeat(MAX_MODEL_NAME_LENGTH))).toHaveLength(MAX_MODEL_NAME_LENGTH);
+  });
+
+  it("lists the models of an account it's given without a model, as Set up Ember AI asks before one's chosen", () => {
+    expect(parseAssistantKeys({ accountId: ACCOUNT_ID, apiToken: API_TOKEN })).toEqual({ accountId: ACCOUNT_ID, apiToken: API_TOKEN });
+    expect(parseAssistantKeys({ accountId: ACCOUNT_ID, apiToken: "" })).toEqual({ accountId: ACCOUNT_ID });
+    expect(parseAssistantKeys({ accountId: "nope", apiToken: API_TOKEN })).toEqual({ error: ACCOUNT_ID_REFUSED, field: "accountId" });
+    expect(parseAssistantKeys({ accountId: ACCOUNT_ID, apiToken: "short" })).toEqual({ error: API_TOKEN_REFUSED, field: "apiToken" });
+  });
+
+  it("adds a model by its ID, and its name if it's given one", () => {
+    expect(parseNewAssistantModel({ model: " openai/gpt-5.5 ", modelName: "GPT-5.5" })).toEqual({ model: "openai/gpt-5.5", modelName: "GPT-5.5" });
+    expect(parseNewAssistantModel({ model: "openai/gpt-5.5" })).toEqual({ model: "openai/gpt-5.5" });
+    for (const data of [null, {}, { model: "gpt-5.5" }, { model: 5 }, { modelName: "GPT-5.5" }]) {
+      expect(parseNewAssistantModel(data)).toEqual({ error: MODEL_REFUSED, field: "model" });
+    }
   });
 
   it("leaves a blank or missing API token out, which keeps the one Ember has", () => {
@@ -72,9 +103,12 @@ describe("Set up Ember AI", () => {
     expect(ASSISTANT_MODELS.filter(({ id }) => id.startsWith("anthropic/")).every(({ format }) => format === "messages")).toBe(true);
   });
 
-  it("names a listed model, and any other by its ID", () => {
+  it("names a model as the models it's given do, or else as Ember does, and any other by its ID", () => {
     expect(modelName("anthropic/claude-sonnet-5.5")).toBe("Claude Sonnet 5.5");
     expect(modelName("openai/gpt-5.5")).toBe("openai/gpt-5.5");
+    const models = [{ id: "openai/gpt-5.5", name: "GPT-5.5", format: "responses" as const }];
+    expect(modelName("openai/gpt-5.5", models)).toBe("GPT-5.5");
+    expect(modelName("anthropic/claude-sonnet-5.5", models)).toBe("Claude Sonnet 5.5");
   });
 });
 
@@ -100,11 +134,30 @@ describe("The dials of @ember's answers", () => {
   });
 
   it("change a dial or both, to a level it has", () => {
-    expect(parseLevelChanges({ thinking: "high" })).toEqual({ thinking: "high" });
-    expect(parseLevelChanges({ length: "short" })).toEqual({ length: "short" });
-    expect(parseLevelChanges({ thinking: "off", length: "long", other: true })).toEqual({ thinking: "off", length: "long" });
-    for (const data of [{}, null, "low", [], { thinking: "max" }, { length: "longest" }, { thinking: "low", length: 3 }, { thinking: null }]) {
-      expect(parseLevelChanges(data)).toBeNull();
+    for (const parse of [parseAssistantChanges, parseYourAssistantChanges]) {
+      expect(parse({ thinking: "high" })).toEqual({ thinking: "high" });
+      expect(parse({ length: "short" })).toEqual({ length: "short" });
+      expect(parse({ thinking: "off", length: "long", other: true })).toEqual({ thinking: "off", length: "long" });
+      for (const data of [{}, null, "low", [], { thinking: "max" }, { length: "longest" }, { thinking: "low", length: 3 }, { thinking: null }, { model: "openai/gpt-5.5", thinking: "max" }]) {
+        expect(parse(data), JSON.stringify(data)).toEqual({ error: LEVELS_REFUSED });
+      }
     }
+  });
+
+  it("change the model, with the dials or without them, to one that can be a model", () => {
+    for (const parse of [parseAssistantChanges, parseYourAssistantChanges]) {
+      expect(parse({ model: " openai/gpt-5.5 " })).toEqual({ model: "openai/gpt-5.5" });
+      expect(parse({ model: "openai/gpt-5.5", length: "short" })).toEqual({ model: "openai/gpt-5.5", length: "short" });
+      for (const model of ["gpt-5.5", 5, "", "openai/gpt 5.5"]) {
+        expect(parse({ model }), JSON.stringify(model)).toEqual({ error: MODEL_NOT_LISTED });
+      }
+    }
+  });
+
+  it("leave your model to administrators when you choose theirs, which no one can for everyone", () => {
+    expect(parseYourAssistantChanges({ model: null })).toEqual({ model: null });
+    expect(parseYourAssistantChanges({ model: null, thinking: "off" })).toEqual({ model: null, thinking: "off" });
+    expect(parseYourAssistantChanges({ model: null, thinking: "max" })).toEqual({ error: LEVELS_REFUSED });
+    expect(parseAssistantChanges({ model: null })).toEqual({ error: MODEL_NOT_LISTED });
   });
 });

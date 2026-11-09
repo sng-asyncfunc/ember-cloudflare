@@ -255,6 +255,19 @@ export function CheckCircle(props: IconoirIconProps) {
   );
 }
 
+export function ClockRotateRight(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="clock-rotate-right" {...props}>
+      <path d="M12 6L12 12L18 12" {...LINE} />
+      <path
+        d="M21.8883 10.5C21.1645 5.68874 17.013 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22C16.1006 22 19.6248 19.5318 21.1679 16"
+        {...LINE}
+      />
+      <path d="M17 16H21.4C21.7314 16 22 16.2686 22 16.6V21" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
 export function Community(props: IconoirIconProps) {
   return (
     <IconoirIcon name="community" {...props}>
@@ -407,6 +420,16 @@ export function EyeClosed(props: IconoirIconProps) {
       <path d="M12 17.5V14" {...LINE} />
       <path d="M4.5 16L6.96895 12.6124" {...LINE} />
       <path d="M3 8C6.6 16 17.4 16 21 8" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
+export function FilterList(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="filter-list" {...props}>
+      <path d="M3 6H21" {...LINE} />
+      <path d="M7 12L17 12" {...LINE} />
+      <path d="M11 18L13 18" {...LINE} />
     </IconoirIcon>
   );
 }
@@ -808,6 +831,18 @@ export function SmartphoneDevice(props: IconoirIconProps) {
         d="M7 19.4V4.6C7 4.26863 7.26863 4 7.6 4H16.4C16.7314 4 17 4.26863 17 4.6V19.4C17 19.7314 16.7314 20 16.4 20H7.6C7.26863 20 7 19.7314 7 19.4Z"
         {...OUTLINE}
       />
+    </IconoirIcon>
+  );
+}
+
+export function Sort(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="sort" {...props}>
+      <path d="M10 14H2" {...LINE} />
+      <path d="M8 10H2" {...LINE} />
+      <path d="M6 6H2" {...LINE} />
+      <path d="M12 18H2" {...LINE} />
+      <path d="M19 20V4M19 20L22 17M19 20L16 17M19 4L22 7M19 4L16 7" {...LINE} />
     </IconoirIcon>
   );
 }

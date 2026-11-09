@@ -1,4 +1,4 @@
-import { HISTORY_PAGE_SIZE, threadPath, type BotAnswer, type BotSettings, type Message, type NewWorkspace, type RoomId, type ServerFrame, type Upload, type User } from "@ember/protocol";
+import { HISTORY_PAGE_SIZE, threadPath, type BotAnswer, type BotSettings, type Message, type NewWorkspace, type RoomId, type SearchResults, type ServerFrame, type Upload, type User } from "@ember/protocol";
 import { MENTION_CONTENT_TYPE, mentionSgid } from "@ember/richtext";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -266,7 +266,7 @@ describe("Deleting messages with threads", () => {
     await vi.waitFor(async () => expect(await roomSql(room, "SELECT seq FROM unindexed_messages WHERE room_id = ?", room)).toEqual([]), { timeout: 5_000 });
 
     const response = await api(`/api/searches?q=zeppelin`, { headers: { Cookie: ada.session.cookie } });
-    const { messages } = (await response.json()) as { messages: Message[] };
+    const messages = ((await response.json()) as SearchResults).matches.map(({ message }) => message);
     expect(idsOf(messages)).toEqual([answer.id]);
     expect(messages[0]).toMatchObject({ parentId: parent.id });
     expect(await searchSql("SELECT count(*) AS n FROM search_messages WHERE message_id = ?", parent.id)).toEqual([{ n: 0 }]);
@@ -280,8 +280,8 @@ describe("Deleting messages with threads", () => {
     await caughtUp(ada);
     const found = async () => {
       await vi.waitFor(async () => expect(await roomSql(room, "SELECT seq FROM unindexed_messages WHERE room_id = ?", room)).toEqual([]), { timeout: 5_000 });
-      const response = await api(`/api/searches?q=zeppelin`, { headers: { Cookie: ada.session.cookie } });
-      return ((await response.json()) as { messages: Message[] }).messages;
+      const response = await api(`/api/searches?q=zeppelin&sort=oldest`, { headers: { Cookie: ada.session.cookie } });
+      return ((await response.json()) as SearchResults).matches.map(({ message }) => message);
     };
     expect(await found()).toMatchObject([
       { id: parent.id, thread: { count: 1 } },

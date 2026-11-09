@@ -241,9 +241,9 @@ export function useHash(): string {
   return useSyncExternalStore(subscribe, () => location.hash);
 }
 
-/** The value `name` has in the query string of the page shown, or null where it has none, re-rendering when it changes. */
-export function useQueryParam(name: string): string | null {
-  return useSyncExternalStore(subscribe, () => new URLSearchParams(shownQuery()).get(name));
+/** The query string of the page shown, from its "?", or nothing, re-rendering when it changes. */
+export function useQuery(): string {
+  return useSyncExternalStore(subscribe, shownQuery);
 }
 
 /**

@@ -67,8 +67,8 @@ describe("Community settings page", () => {
     const administrator = await setUp();
     const member = await signIn("Grace");
     const joinCode = await storedJoinCode();
-    expect(await (await settings(administrator)).json()).toEqual({ account: named("Ember"), joinCode, canAdminister: true, memberfulSite: null, memberfulWebhooks: false, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], addresses: { deployed: null, others: [] }, assistant: null } satisfies WorkspaceSettings);
-    expect(await (await settings(member)).json()).toEqual({ account: named("Ember"), joinCode, canAdminister: false, memberfulSite: null, memberfulWebhooks: false, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], addresses: { deployed: null, others: [] }, assistant: null } satisfies WorkspaceSettings);
+    expect(await (await settings(administrator)).json()).toEqual({ account: named("Ember"), joinCode, canAdminister: true, memberfulSite: null, memberfulWebhooks: false, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], addresses: { deployed: null, others: [] }, assistant: null, cloudflareAccountId: null } satisfies WorkspaceSettings);
+    expect(await (await settings(member)).json()).toEqual({ account: named("Ember"), joinCode, canAdminister: false, memberfulSite: null, memberfulWebhooks: false, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], addresses: { deployed: null, others: [] }, assistant: null, cloudflareAccountId: null } satisfies WorkspaceSettings);
   });
 
   it("asks who's signed in", async () => {
@@ -104,7 +104,7 @@ describe("Rename the workspace", () => {
     expect(await response.json()).toEqual({ account: named("Ember Studio") });
     expect((await storedAccount()).name).toBe("Ember Studio");
 
-    expect(await (await settings(member)).json()).toEqual({ account: named("Ember Studio"), joinCode: await storedJoinCode(), canAdminister: false, memberfulSite: null, memberfulWebhooks: false, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], addresses: { deployed: null, others: [] }, assistant: null } satisfies WorkspaceSettings);
+    expect(await (await settings(member)).json()).toEqual({ account: named("Ember Studio"), joinCode: await storedJoinCode(), canAdminister: false, memberfulSite: null, memberfulWebhooks: false, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], addresses: { deployed: null, others: [] }, assistant: null, cloudflareAccountId: null } satisfies WorkspaceSettings);
     expect((await bootstrap(member)).account).toEqual(named("Ember Studio"));
     // "Sign in to <name>", and the installed app's name.
     expect((await bootstrap()).account).toEqual(named("Ember Studio"));

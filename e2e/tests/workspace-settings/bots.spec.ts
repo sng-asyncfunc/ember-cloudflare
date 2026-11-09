@@ -1,7 +1,7 @@
 import { createServer, type IncomingHttpHeaders, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
-import { devices, type APIResponse, type Page } from "@playwright/test";
+import { devices, type APIResponse, type Locator, type Page } from "@playwright/test";
 import { expect, test } from "../../fixtures";
 import { ADMINISTRATOR, drawnPicture, editorField, nextSecond, shownPicture, signInAsAdministrator, useOwnAddress } from "../../fixtures";
 import { auditScreen } from "../mobile/audits";
@@ -12,6 +12,13 @@ const COMMAND = /^curl -d 'Hello!' https:\/\/127\.0\.0\.1:\d+\/rooms\/[^/]+\/[^/
 
 /** A bot's entry on the bots page. */
 const botNamed = (page: Page, name: string) => page.getByRole("listitem").filter({ has: page.getByText(name, { exact: true }) });
+
+/** Where `locator` is drawn. */
+async function box(locator: Locator) {
+  const rect = await locator.boundingBox();
+  if (!rect) throw new Error("Not visible");
+  return rect;
+}
 
 /** Signs the administrator in on the bots page, from workspace settings' Chat bots. */
 async function openBots(page: Page) {
@@ -28,7 +35,7 @@ async function addBot(page: Page, name: string, webhookUrl = "") {
   await page.getByRole("link", { name: "Add a chat bot" }).click();
   await expect(page).toHaveURL(/\/account\/bots\/new$/);
   await page.getByRole("textbox", { name: "Bot name" }).fill(name);
-  await page.getByRole("textbox", { name: "Webhook URL" }).fill(webhookUrl);
+  await page.getByRole("textbox", { name: "Webhook URL", exact: true }).fill(webhookUrl);
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page).toHaveURL(/\/account\/bots$/);
 }
@@ -104,11 +111,16 @@ test.describe("Add and edit a bot", () => {
     const general = botNamed(page, name).getByRole("group", { name: "general", exact: true });
     await expect(general.getByRole("textbox", { name: "curl command for posting messages" })).toHaveValue(COMMAND);
     await expect(general.getByRole("textbox", { name: "curl command for posting attachments" })).toHaveValue(/^curl -F "attachment=@\/path\/to\/file" https:/);
+    const command = await general.getByRole("textbox", { name: "curl command for posting messages" }).inputValue();
 
     await botNamed(page, name).getByRole("link", { name: `Edit ${name}` }).click();
     await expect(page).toHaveURL(/\/account\/bots\/[^/]+\/edit$/);
     await expect(page.getByRole("textbox", { name: "Bot name" })).toHaveValue(name);
-    await expect(page.getByRole("textbox", { name: "Webhook URL" })).toHaveValue("https://ci.example.com/hook");
+    await expect(page.getByRole("textbox", { name: "Webhook URL", exact: true })).toHaveValue("https://ci.example.com/hook");
+    // Its settings give the same commands, a room at a time.
+    const incoming = page.getByRole("region", { name: "Incoming" });
+    await incoming.getByRole("combobox", { name: "Room" }).selectOption({ label: "general" });
+    await expect(incoming.getByRole("group", { name: "general", exact: true }).getByRole("textbox", { name: "curl command for posting messages" })).toHaveValue(command);
     const renamed = `Deploy Bot ${crypto.randomUUID().slice(0, 8)}`;
     await page.getByRole("textbox", { name: "Bot name" }).fill(renamed);
     await page.getByRole("button", { name: "Save changes" }).click();
@@ -190,7 +202,7 @@ test.describe("Delete a bot", () => {
 });
 
 test.describe("Bots post messages", () => {
-  test("a bot's command posts to its room as the bot, which shows there at once, and the bot reads it back", async ({ page }) => {
+  test("a bot's command posts to its room as the bot, which shows there at once by its round avatar, and the bot reads it back", async ({ page }) => {
     const name = `Build Bot ${crypto.randomUUID().slice(0, 8)}`;
     const url = await openGeneralFor(page, name);
     const text = `Deploy finished ${crypto.randomUUID().slice(0, 8)}`;
@@ -199,6 +211,9 @@ test.describe("Bots post messages", () => {
     const message = page.getByRole("article").filter({ hasText: text });
     await expect(message).toBeVisible();
     await expect(message).toContainText(name);
+    // A circle, where a person's avatar in a message is a square with rounded corners.
+    const avatar = message.locator("[aria-hidden=true]").first();
+    await expect.poll(() => avatar.evaluate((image: HTMLElement) => parseFloat(getComputedStyle(image).borderRadius) >= image.offsetWidth / 2)).toBe(true);
 
     const read = await page.request.get(url);
     expect(read.status()).toBe(200);
@@ -561,6 +576,53 @@ test.describe("Chat bots page", () => {
       await expect(member.getByRole("link", { name: "Chat bots" })).toHaveCount(0);
     }
     await member.context().close();
+  });
+
+  test("spaces its heading, explainer and Add a chat bot apart, with the bots lined up under them, on a computer and a phone", async ({ page, browser, baseURL }) => {
+    await openBots(page);
+    await addBot(page, `Spacing Bot ${crypto.randomUUID().slice(0, 8)}`);
+    /** The page's heading, explainer, Add a chat bot and first bot, where they're drawn. */
+    const header = async (on: Page) => {
+      const main = on.getByRole("main");
+      const [heading, explainer, add, bot] = [
+        main.getByRole("heading", { level: 1, name: "Chat bots" }),
+        main.getByText(/^Chat bots let other apps and services post in your rooms/),
+        main.getByRole("link", { name: "Add a chat bot" }),
+        main.getByRole("listitem").first(),
+      ];
+      await expect(bot).toBeVisible();
+      return { heading: await box(heading), explainer: await box(explainer), add: await box(add), bot: await box(bot) };
+    };
+
+    // On a computer, Add a chat bot ends the heading's row, centered on the heading, the explainer starts
+    // under both, as a section's description does under its heading, and the bots 28px under that, as wide
+    // as the row.
+    const { heading, explainer, add, bot } = await header(page);
+    expect(add.y + add.height / 2).toBeCloseTo(heading.y + heading.height / 2, 0);
+    expect(add.x).toBeGreaterThan(heading.x + heading.width);
+    expect(explainer.y - (add.y + add.height)).toBeCloseTo(6, 0);
+    expect(bot.y - (explainer.y + explainer.height)).toBeCloseTo(28, 0);
+    expect(bot.x).toBeCloseTo(heading.x, 0);
+    expect(bot.x + bot.width).toBeCloseTo(add.x + add.width, 0);
+
+    // On a phone, Add a chat bot follows the explainer, 16px under it, rather than wrapping in between them,
+    // and the bots start 28px under it, all at the heading's edge.
+    const phone = await browser.newContext({ ...devices["Galaxy S24"], baseURL, ignoreHTTPSErrors: true });
+    try {
+      const onPhone = await phone.newPage();
+      await useOwnAddress(onPhone);
+      await onPhone.goto("/account/bots");
+      await signInAsAdministrator(onPhone);
+      const shown = await header(onPhone);
+      expect(shown.add.y - (shown.explainer.y + shown.explainer.height)).toBeCloseTo(16, 0);
+      expect(shown.bot.y - (shown.add.y + shown.add.height)).toBeCloseTo(28, 0);
+      for (const { x } of [shown.explainer, shown.add, shown.bot]) expect(x).toBeCloseTo(shown.heading.x, 0);
+      const results = await auditScreen(onPhone, { top: 0, right: 0, bottom: 0, left: 0 });
+      expect(results.overflow, "Nothing is cut off or pushed off the side of the screen").toEqual([]);
+      expect(results.touchTargets, "Every control is easy to tap").toEqual([]);
+    } finally {
+      await phone.close();
+    }
   });
 });
 

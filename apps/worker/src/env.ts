@@ -35,9 +35,15 @@ export interface Env {
   /** What the Set up Ember form suggests for their email address in place of "kevin@kevinrose.com". */
   EMBER_SETUP_EMAIL_PLACEHOLDER?: string;
   /**
-   * 64 lowercase hex characters (`openssl rand -hex 32`) that the deploy's setup link carries, which
-   * is what lets its holder set Ember up (setup.ts). `pnpm run deploy` makes one for a Worker that has
-   * none. Unset, setup is closed, except over loopback, where `wrangler dev` serves.
+   * The setup password, which the Set up Ember page asks for, so that only whoever deployed Ember sets
+   * it up (setup.ts). Deploy to Cloudflare's form asks the deployer to make one up. With neither it nor
+   * EMBER_SETUP_TOKEN, setup is closed, except over loopback, where `wrangler dev` serves.
+   */
+  EMBER_SETUP_PASSWORD?: string;
+  /**
+   * 64 lowercase hex characters (`openssl rand -hex 32`) that the setup link a deploy prints carries,
+   * which also lets its holder set Ember up. `pnpm run deploy` makes one for a Worker that has neither it
+   * nor a setup password. Set to anything else, it counts as a setup password.
    */
   EMBER_SETUP_TOKEN?: string;
   /**
@@ -92,6 +98,11 @@ export interface Env {
   /** Where Resend's API is, for the browser tests' stand-in, which only a loopback address can be. */
   RESEND_API_URL?: string;
   /**
+   * The ID of the Cloudflare account the Worker is deployed to, which a Worker can't learn by itself:
+   * `pnpm run deploy` gives it, and Set up Ember AI fills it in for administrators.
+   */
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  /**
    * Where Cloudflare's API is, which Ember AI asks AI Gateway through, for the browser tests' stand-in,
    * which only a loopback address can be: `http://127.0.0.1:8793` has Ember ask
    * `http://127.0.0.1:8793/accounts/<id>/ai/v1/...` (assistant/gateway.ts).
@@ -115,6 +126,15 @@ export interface Env {
   APP_VERSION?: string;
   /** The commit deployed, which stands in for the version when APP_VERSION isn't set. */
   GIT_REVISION?: string;
+  /**
+   * The GitHub repository of the copy of Ember deployed, as `owner/name`, which `pnpm run deploy` gives
+   * where git's origin is a copy on GitHub, with GIT_BRANCH, the branch that deploys, and UPDATE_WORKFLOW,
+   * "true" where the copy has the Update Ember workflow: General's release card links to running it, or
+   * to adding it.
+   */
+  GITHUB_REPOSITORY?: string;
+  GIT_BRANCH?: string;
+  UPDATE_WORKFLOW?: string;
   /**
    * Any value but a blank one lets plain HTTP through rather than redirecting it to HTTPS, and leaves
    * out HSTS. Loopback addresses, where `wrangler dev` serves, never need it.

@@ -11,6 +11,7 @@ account, as [Deploying](#deploying) describes.
 
 - [Deploying](#deploying)
   - [Updating](#updating)
+  - [The build's token](#the-builds-token)
   - [A custom domain](#a-custom-domain)
   - [Who can join](#who-can-join)
   - [Memberful sign-in](#memberful-sign-in)
@@ -28,10 +29,17 @@ account, as [Deploying](#deploying) describes.
 
 ## Deploying
 
-The Deploy to Cloudflare button at the top asks you to name the repository, the Worker and the R2
-bucket for files (turn R2 on for your account first), then Cloudflare's Workers Builds builds and
-deploys it, and again after every push to the copy. There are no secrets to fill in. To deploy from
-your machine instead, after `pnpm exec wrangler login`:
+The Deploy to Cloudflare button at the top asks you to name the repository, the Worker, the R2
+bucket for files (turn R2 on for your account first) and a D1 database, to choose where messages
+live, as [Storage](#storage-durable-object-sqlite-or-d1) says, and to make up a setup password,
+`EMBER_SETUP_PASSWORD`, then Cloudflare's Workers Builds builds and deploys it, and again after
+every push to the copy. Connecting GitHub or GitLab to Cloudflare the
+first time leaves you on Cloudflare's page for deploying one of your own repositories, so click the
+button again afterwards. If your account already has a bucket named `ember`, the form picks it, so
+pick a new one there for this Ember's files, and choose Create new for the database if it picks one
+another Ember uses. The copy has all of Ember but its `.github` folder, so
+add the Update Ember workflow to it, as [Updating](#updating) says, for it to be offered Ember's
+releases. To deploy from your machine instead, after `pnpm exec wrangler login`:
 
 ```sh
 pnpm build
@@ -41,24 +49,47 @@ pnpm run deploy        # not `pnpm deploy`, which is pnpm's own command
 Either way, `pnpm run deploy` (`apps/worker/scripts/deploy.ts`) makes the Worker's `SESSION_SECRET`
 and a VAPID key pair for push notifications on its first deploy, and later deploys keep them, since
 a new secret would sign everyone out and a new pair would end every push subscription. They go up
-with the code and never appear in the deploy's output.
+with the code and never appear in the deploy's output. So does the ID of the Cloudflare account the
+Worker goes to, as `CLOUDFLARE_ACCOUNT_ID`, which a Worker can't find out by itself, for
+[Set up Ember AI](#ember-ai) to fill in: the account the `CLOUDFLARE_ACCOUNT_ID` environment
+variable names, if it's set, or else the only one your login reaches, as a Deploy to Cloudflare
+build's token does. A login that reaches several gives none, unless you set the variable, and the
+field starts blank. Where git's origin is a copy of Ember on GitHub, as a Deploy to Cloudflare build's
+is, the deploy tells the Worker about it in three variables, for General's release card to link to
+its Update Ember workflow ([Updating](#updating)): `GITHUB_REPOSITORY`, the copy's `owner/name`;
+`GIT_BRANCH`, the branch that deploys, Workers Builds' or else `main`; and `UPDATE_WORKFLOW`, `true`
+where the copy has the workflow. A `--var` of the same name keeps its own value.
 
-The first deploy also makes the Worker's setup token, `EMBER_SETUP_TOKEN`, and ends by printing the
-setup link that carries it, `https://<your Worker>/first_run#token=<the token>`: in your terminal,
-or in the build's log in the Cloudflare dashboard after Deploy to Cloudflare. Open it to set up
-Ember. Only that link opens the form, so nobody who merely finds the address can make themselves the
-administrator, and once Ember is set up the link is spent: setup closes for good, as in Campfire.
-The token rides in the link's fragment, which no request or log sees. `/first_run` opened without it
-says all this, and if the link is lost, make a new token, give it to the Worker, and open the link
-with that one:
+Whoever deployed Ember sets it up, and nobody else. After Deploy to Cloudflare, open the Worker's
+address and type the setup password you gave the form: `/first_run` asks for it before the
+administrator's account, so nobody who merely finds the address can make themselves the
+administrator, and it allows 10 tries at the password every 10 minutes, from anywhere, so guessing
+it is slow. Once Ember is set up, setup closes for good, as in Campfire. If the password is
+forgotten, give `EMBER_SETUP_PASSWORD` a new value in the Worker's **Settings**, under **Variables and
+Secrets**, or from a terminal, and type that one:
+
+```sh
+pnpm exec wrangler secret put EMBER_SETUP_PASSWORD   # asks for it; add --name <worker> for a Worker not named in wrangler.jsonc
+```
+
+A first deploy from a terminal, for a Worker with no setup password, makes the Worker a setup token,
+`EMBER_SETUP_TOKEN`, instead, and once it has deployed, prints the setup link that carries it,
+`https://<your Worker>/first_run#token=<the token>`, which opens the form without asking for a
+password. The token rides in the link's fragment, which no request or log sees, and the link is
+spent once Ember is set up. If it's lost, give the Worker a setup password as above, or make a new
+token, give it to the Worker, and open the link with that one:
 
 ```sh
 openssl rand -hex 32                              # the new token: keep it
 pnpm exec wrangler secret put EMBER_SETUP_TOKEN   # asks for it; add --name <worker> for a Worker not named in wrangler.jsonc
 ```
 
-On localhost, where `wrangler dev` serves, setup is open to whoever's there unless `.dev.vars`
-sets a token.
+A deploy whose environment sets `EMBER_SETUP_PASSWORD` gives a Worker without one that password, and
+makes it no token. A setup password of any length opens setup, as the deploy form can't ask for a
+longer one; a setup token set to anything but 64 lowercase hex characters counts as a setup
+password. Spaces and line breaks around either, which pasting can bring along, don't count. On
+localhost, where `wrangler dev` serves, setup is open to whoever's there unless `.dev.vars` sets a
+setup password or token.
 
 The setup form suggests Kevin Rose and kevin@kevinrose.com for the administrator. To suggest your
 own, set the Worker's `EMBER_SETUP_NAME_PLACEHOLDER` and `EMBER_SETUP_EMAIL_PLACEHOLDER` variables,
@@ -78,17 +109,31 @@ touching storage.
 ### Updating
 
 Ember publishes [releases](https://github.com/NYLLON-SOFTWARE/ember-cloudflare/releases), and a copy
-made with Deploy to Cloudflare comes up to each with a pull request. Its Update Ember workflow
-(`.github/workflows/update-ember.yml`) looks for a newer release every Monday, or when you run it from
-the Actions tab (Update Ember, then Run workflow), and opens a pull request, "Update Ember to v1.2.3",
-that links to what's new. Merging it deploys the update, as every push to `main` does, and that's all:
-each room's and the workspace's tables bring themselves up to date the first time they open. Closing
-it instead turns that release down until the next, whose pull request brings its changes too.
+made with Deploy to Cloudflare comes up to each with a pull request from its Update Ember workflow,
+`.github/workflows/update-ember.yml`, once you add it. Cloudflare's copy leaves out Ember's `.github`
+folder, so every deploy without the workflow ends its build log by saying so, and where git tells the
+build which GitHub repository it's from, with a link that opens GitHub's editor on your copy with
+Ember's workflow filled in: commit it there. Or create the file in your copy, on GitHub with **Add
+file**, then **Create new file**, with what
+[Ember's](https://github.com/NYLLON-SOFTWARE/ember-cloudflare/blob/main/.github/workflows/update-ember.yml)
+has.
+
+The workflow looks for a newer release every Monday, or when you run it from the Actions tab (Update
+Ember, then Run workflow), and opens a pull request, "Update Ember to v1.2.3", that links to what's
+new. Merging it deploys the update, as every push to `main` does, and that's all: each room's and the
+workspace's tables bring themselves up to date the first time they open. Closing it instead turns that
+release down until the next, whose pull request brings its changes too. Workers Builds builds each
+pull request's branch as a Preview, and the pull request shows whether it built; that's all a Preview
+is for, since `wrangler.jsonc` gives Previews none of Ember's bindings and no address.
 
 Ember tells its administrators too: while a newer release is out, Admin on the rail has a dot, and
-General, in Community settings, names the release, with its notes and how to update. To know, the
-Worker asks GitHub for the page of Ember's latest release once an administrator has Ember open, telling
-it nothing but the version it is, and keeps the answer for six hours.
+General, in Community settings, names the release, with its notes and how to update. For a copy the
+deploy told the Worker about, **Open GitHub action to update** opens the copy's Update Ember workflow
+on GitHub, where **Run workflow** opens the pull request now, or, while the copy has no workflow,
+**Add GitHub action to update** opens GitHub's editor with it filled in, as the build log's link does.
+To know, the Worker asks GitHub for the page of Ember's latest release once an administrator has Ember
+open, telling it nothing but the version it is, and keeps the answer for six hours, but asks again
+each time an administrator opens Admin, at most once a minute.
 
 A new GitHub repository doesn't let workflows open pull requests, so until yours does, the workflow
 opens an issue instead, with a link that opens the pull request for you to merge. To have it open them
@@ -122,6 +167,34 @@ git push -u origin update-ember/v1.2.3      # then merge it into main
 
 A clone of Ember's own repository shares its history, so `git pull` brings it up to date too, or the
 script, which merges from where yours and Ember's part.
+
+### The build's token
+
+Workers Builds deploys a Deploy to Cloudflare copy with an API token it made for the copy's Worker,
+`<your Worker> build token`. It holds far more than the seven permissions Cloudflare's docs list for
+it: it may edit every Worker, R2 bucket, KV namespace, D1 database and queue in the account, its AI
+and containers among much else, and the Workers Routes, certificates and Email Routing rules of every
+zone in every account you belong to. That's why R2's **Manage API tokens** page lists it as Admin
+Read & Write for all buckets. Ember's builds need four of those permissions: Workers Scripts, to
+deploy the Worker, and Account Settings, User Details and Memberships, with which `pnpm run deploy`
+finds the account's ID. On `d1` they need D1 as well, to make and migrate the database messages live
+in ([Storage](#storage-durable-object-sqlite-or-d1)); on `do-sqlite` the deploy leaves the form's
+database unbound and never touches D1. The Worker reaches its bucket through its binding, which takes
+no token, the deploy form makes the bucket before the first build, and `wrangler.jsonc` binds no
+namespace or queue and lists no routes. So once your copy has deployed, trim the token. In **My
+Profile**, under **API Tokens**, choose **Edit** on it, remove every permission but Workers Scripts,
+Account Settings, User Details and Memberships, and D1 on `d1`, and choose **Update token**. Edit
+keeps the token's value, which the builds hold, where Roll would give it a new one and fail every
+build until the Worker's **Settings**, under **Build**, name a token again.
+
+Every build runs with that token, those of Update Ember's pull requests included, so the less it may
+do, the less a dependency gone bad could. The Worker's **Settings**, under **Build**, name the token
+it builds with, and deleting the Worker leaves the token as it was: delete it too, under **API
+Tokens**, unless another Worker builds with it.
+
+Trimmed, the token can still deploy Workers, and a Worker may be bound to any bucket, database or
+namespace in its account, whatever its deployer's token may do with them. So keep what Ember's
+deploys shouldn't reach, such as another project's files, in a Cloudflare account of its own.
 
 ### A custom domain
 
@@ -164,7 +237,7 @@ removed on the Worker's Domains tab, which only the dashboard does. So Custom do
 Ember moved away from, links to that tab, and checks each until it's gone. Workspace settings stay
 wherever they're opened, so if Ember's domain ever stops reaching it, open Domain settings at the
 workers.dev address and go back there. Deploys leave the domain alone as long as `wrangler.jsonc` lists no
-`routes`.
+`routes`, and keep the workers.dev address on (`workers_dev`), for going back.
 
 #### When the domain's DNS is elsewhere
 
@@ -410,14 +483,38 @@ back together. R2 deletes the parts of an upload nobody finishes after a week.
 
 An administrator adds @ember, an AI assistant, on the AI assistant tab of community settings. Turning
 on its Ember AI card opens Set up Ember AI, which takes a Cloudflare account's ID and an API token,
-both from Workers AI's Use REST API in the Cloudflare dashboard, then a model. Ember asks models
-through the account's default [AI Gateway](https://developers.cloudflare.com/ai-gateway/), whose
+both from Workers AI's Use REST API in the Cloudflare dashboard, then a model. The account's ID
+starts as the one Ember is deployed to, when the deploy gave it, leaving only the token to copy, and
+the dialog's links open that account's pages in the dashboard. Ember asks models through the
+account's default [AI Gateway](https://developers.cloudflare.com/ai-gateway/), whose
 logs, caching and spend limits apply. Workers AI's models come with Cloudflare's free daily
 allowance, and other companies', such as Anthropic's, OpenAI's and Google's, are paid for with AI
-Gateway's credits, as [What it costs](#what-it-costs) says. The Worker asks the model a test question
-before keeping the setup. @ember then joins every room open to everyone, and turning the card off
-takes it out again and forgets the token. Nobody else can take the name Ember, though anyone who had
-it keeps it.
+Gateway's credits, as [What it costs](#what-it-costs) says. The model menu lists the text models in
+Cloudflare's [model catalog](https://developers.cloudflare.com/ai/models/), as the Worker reads it with
+the token (`GET /accounts/{id}/ai/catalog/models`) as the dialog goes on to the model, so new models
+show up as Cloudflare adds them: Workers AI's first, then other companies', with what each
+million tokens costs where the catalog says. When the catalog can't be read, the menu has the models
+Ember knows and says why, and Another model takes any model by its ID. The Worker asks the model a
+test question before keeping the setup. @ember then joins every room open to everyone, and turning the
+card off takes it out again and forgets the token. Nobody else can take the name Ember, though anyone
+who had it keeps it.
+
+@ember's avatar is Ember's flame until an administrator picks a picture in the Avatar section of the
+Ember AI card, which R2 keeps as it does people's avatars, and Use Ember's flame brings the flame back.
+The picture stays while Ember AI is off, as @ember's messages do. Each change gives the avatar a new
+address, even two changes in the same second, and every open page hears of it at once, so nobody's
+browser goes on showing the old picture it keeps for half an hour.
+
+The Models list on the Ember AI card has the models people can pick, at most 20, starting with the one
+Set up Ember AI chose. Its radio buttons choose which answers everyone who hasn't picked another, Add
+a model offers the catalog's text models nobody can pick yet, asking the one chosen a test question
+before adding it, and Remove takes one out. Each person picks theirs from the Model menu under Ember
+AI on their profile, which shows while there's more than one: Default follows the administrators'
+choice, whichever model they choose, and a model picked by name stays theirs, even the one that's the
+default. Someone whose model is removed gets the default again, and their pick back if it's added
+again. Changing the model in Set up Ember AI puts the one chosen in place of the old default, and
+turning Ember AI off forgets the list. When the model someone picked has run out of credits or won't
+take the question, @ember's note says they can pick another.
 
 Mention @ember in a room or a thread, or write to it in a DM, and it answers there: in the thread when
 it's asked in one, typing while its model answers. It reads the thread, its first message and latest
@@ -445,24 +542,48 @@ as the levels may take, 2 minutes at the least and about 13 at High and Long. An
 cuts short ends with an ellipsis, and when the model thinks for all it may before writing anything,
 @ember says so and suggests less thinking.
 
+Search the web, on the Ember AI card, lets @ember search the web and read pages with its model's own
+tools, which AI Gateway passes on and the model's provider runs
+([Cloudflare's guide](https://developers.cloudflare.com/ai-gateway/usage/web-search/)): Anthropic's
+[web search](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool) and
+[web fetch](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool) for a model
+that takes Messages, and OpenAI's [web search](https://platform.openai.com/docs/guides/tools-web-search)
+for one that takes Responses. Chat Completions has no such tools, so a Workers AI or Google model
+can't search, which the card says, its switch opening Set up Ember AI to choose another model.
+Turning it on asks the model that answers everyone a question it has to search the web for, and keeps
+the tools AI Gateway took, reading pages only if it took that tool too, and says what the model found;
+a model that answers without searching leaves it off. Choosing another model to answer everyone, under
+Models or in Set up Ember AI, or another Cloudflare account there, turns it off, as another model, or
+another account's AI Gateway, may not take the same tools, until it's turned on again. A model someone
+picks on their profile is given the same tools, of those its format has, so it searches too if it's
+Anthropic's or OpenAI's, and any other is told to say it can't, and that they can pick one that can.
+While it's on, @ember searches at most 5 times an answer and reads at most 3 pages, each cut to about
+10,000 tokens: pages people link to, or that its searches find. Its answer is what it writes after it
+last searches, and a line under it links to the pages it cites and the pages it read, by their titles,
+at most 10, leaving out those the answer links to itself. A model that stops taking the tools is asked
+again without them, told it can't search this time. Its searches are written from the conversation, so
+the provider's search sees what the room was asking about. While it's off, @ember is told it can't
+search, and that an administrator can turn Search the web on.
+
 ### A preview from GitHub Actions
 
 The Preview workflow (`.github/workflows/preview.yml`) deploys `main` to a Worker named
-`ember-production` on your workers.dev subdomain after every push, or when run by hand from the
-Actions tab. It needs two repository secrets, and skips without them:
+`ember-production` on your workers.dev subdomain when run by hand from the Actions tab. It needs two
+repository secrets, and skips without them:
 
 - `CLOUDFLARE_API_TOKEN`: a token made from the "Edit Cloudflare Workers" template.
 - `CLOUDFLARE_ACCOUNT_ID`: under Account details on the Workers & Pages overview.
 
 The first deploy makes the Worker's `SESSION_SECRET` and VAPID key pair, and later ones keep them;
-they go up with the deploy, never in its logs. A public repository's Actions logs are public too, so
+they go up with the deploy, never in its logs, as the account's ID does, for Set up Ember AI to fill
+in. A public repository's Actions logs are public too, so
 the workflow prints no setup link and makes no setup token: the Worker takes its token from an
 `EMBER_SETUP_TOKEN` repository secret, if you add one (`openssl rand -hex 32`) before the first
 deploy, and the run's log then says to open `<the preview>/first_run#token=<your token>` to set
-Ember up. Without the secret, the deploy check says nobody can set the preview up until you deploy
-it from a terminal with `pnpm run deploy --name ember-production`, which makes a token and prints
-the link, or make one with `openssl rand -hex 32` and give it to the preview with
-`wrangler secret put EMBER_SETUP_TOKEN --name ember-production`, which asks for it.
+Ember up. Without the secret, the deploy check says nobody can set the preview up until you give it
+a setup password with `wrangler secret put EMBER_SETUP_PASSWORD --name ember-production`, which asks
+for it, or deploy it from a terminal with `pnpm run deploy --name ember-production`, which makes a
+token and prints the link.
 
 Repository variables named `EMBER_SETUP_NAME_PLACEHOLDER` and `EMBER_SETUP_EMAIL_PLACEHOLDER`, if
 you add them, become the preview's setup form placeholders.
@@ -472,9 +593,9 @@ Its version, under the sign-in page's card, is the commit it deployed. After eac
 `node apps/worker/scripts/check-deploy.ts <url>` checks, without signing in, that `/api/health`
 answers (which needs `SESSION_SECRET`, and the Workspace and a room's Durable Object reading their
 storage), that the page loads through the Worker with its headers, that the API asks for sign-in,
-and whether Ember is set up yet, or waits for its setup link. `/api/health` tells strangers only
-whether Ember is up; with the Worker's `EMBER_RECOVERY_TOKEN` in its environment, the check hears
-which storage it uses too, and why when it's down. It sends the token only to an `https://` address,
+and whether Ember is set up yet, or waits for its setup password or link. `/api/health` tells
+strangers only whether Ember is up; with the Worker's `EMBER_RECOVERY_TOKEN` in its environment, the
+check hears which storage it uses too, and why when it's down. It sends the token only to an `https://` address,
 or an `http://` one on this machine, and follows no redirect with it. The preview's link is on the
 run's summary and under the repository's Deployments.
 
@@ -520,8 +641,10 @@ address the API doesn't have does.
 
 ### Security notes
 
-What a self-hoster should know, beyond keeping the setup link to themselves:
+What a self-hoster should know, beyond keeping the setup password and link to themselves:
 
+- The API token Deploy to Cloudflare's builds run with may edit nearly everything in your account,
+  every R2 bucket included, so trim it, as [The build's token](#the-builds-token) says.
 - Every answer carries a `Content-Security-Policy` beside Rails' headers: scripts only from your
   Worker, images from any HTTPS site, since link previews show their page's image, and no page of
   Ember's in a frame elsewhere. When the policy gets in the way of something in a browser, the
@@ -552,9 +675,13 @@ What a self-hoster should know, beyond keeping the setup link to themselves:
   your current password, so holding someone's session isn't enough to take their account, and a new
   password ends your other sessions and forgets their browsers' push subscriptions. A password reset,
   deactivation or ban ends all of a person's sessions within a minute.
-- Until Ember is set up, only the setup link the deploy printed opens the form, so finding a new
-  deployment's address isn't enough to become its administrator; on localhost, and on a Worker
-  without a setup token, setup is open or closed as [Deploying](#deploying) says.
+- Until Ember is set up, only the setup password, or the setup link a deploy printed, opens the form,
+  so finding a new deployment's address isn't enough to become its administrator. Tries at the
+  password count against one limit for the whole deployment, 10 every 10 minutes, kept in its
+  storage, so neither another address nor a restarted Worker starts the count over; past it, the
+  right password waits too, though the link doesn't, since its token is too long to guess. Ember
+  takes a setup password of any length, so make yours one nobody would guess in a few tries. On
+  localhost, and on a Worker with neither, setup is open or closed as [Deploying](#deploying) says.
 - `EMBER_GUEST_SIGN_IN=true` lets anyone with the address in with just a name, so keep it to
   `wrangler dev`, as `.dev.vars.example` says.
 - With Open on, anyone who finds the address can make an account, with any email address, and
@@ -614,6 +741,10 @@ pages had them in October 2026:
   AI Gateway's credits, at each provider's own per-token prices, plus a 5% fee on the credits bought.
   Thinking counts as output, as the answer does, so the [dials](#ember-ai) bound what one answer
   costs: at most 3,000 tokens out at Off and Short, 6,000 at Low and Medium, and 38,000 at High and Long.
+  Each person's questions cost what the model they pick does, so add to the Models list only the
+  models you're happy to pay for. While Search the web is on, an answer can also search up to 5 times,
+  which Anthropic charges $10 per 1,000 searches for and OpenAI its own price per search, and the
+  results and pages it reads count as input, up to about 10,000 tokens a page.
 
 Cloudflare's pages have the details: [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/),
 [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/),
@@ -623,14 +754,43 @@ Cloudflare's pages have the details: [Workers pricing](https://developers.cloudf
 
 ## Storage: Durable Object SQLite or D1
 
-`STORAGE_BACKEND` in `wrangler.jsonc` picks where messages live.
+`STORAGE_BACKEND` picks where messages live, and with them the rooms, the people and the rest of what
+Ember keeps: type it in Deploy to Cloudflare's form, or set it in `wrangler.jsonc`'s `vars`.
 
-- **`do-sqlite`** (default): each room's Durable Object keeps its messages in its own SQLite
-  storage. Nothing to provision, and reads and writes never leave the object.
-- **`d1`**: messages go to one shared D1 database, which makes cross-room queries (activity,
-  exports) straightforward. Create the database with `pnpm exec wrangler d1 create ember`,
-  uncomment the `d1_databases` block, set `STORAGE_BACKEND` to `"d1"`, and apply
-  `apps/worker/migrations/` with `pnpm --filter @ember/worker d1:migrate:local` (or `--remote`).
+- **`do-sqlite`** (the default): each room's Durable Object keeps its messages in its own SQLite
+  storage, and the Workspace object keeps what the rooms share in its own. There's nothing to set up,
+  reads and writes never leave the object, and no room waits on another, so it scales furthest:
+  Durable Objects may keep 5 GB in all on Workers Free, and 10 GB for each room on Workers Paid.
+- **`d1`**: everything goes to one D1 database, which you can query in the dashboard or with
+  `wrangler d1 execute`, export with `wrangler d1 export`, and restore to any minute of the last 7 days
+  (30 on Workers Paid) with Time Travel. It's one database for the whole Ember, which runs one query at
+  a time, each a trip from the room's object to the database, and holds at most 500 MB on Workers Free
+  and 10 GB on Workers Paid, which Cloudflare can't raise.
+
+Neither choice changes much how many people Ember carries: on Workers Free, D1 has a daily allowance
+of rows written of its own beside Durable Objects', which lifts the estimate in
+[What it costs](#what-it-costs) from about 100 people a day to about 125. Past that, move to Workers
+Paid, whichever you chose. Choose before you set Ember up: nothing moves messages from one to the
+other, so switching later starts an empty Ember, to be set up again, and leaves the messages where
+they were.
+
+The form makes the D1 database bound as `DB` whatever you type, since it can't make one only for D1;
+on `do-sqlite`, the deploy leaves it unbound and empty. From a terminal, set `STORAGE_BACKEND` to
+`"d1"` and run `pnpm run deploy`, which makes the database that `d1_databases` names, `ember`, if your
+account has none of that name. Each Ember needs a database of its own, so give a second one another
+`database_name`.
+
+On `d1`, `pnpm run deploy` applies `apps/worker/migrations/` to the database before the Worker deploys,
+which takes a Cloudflare API token that may edit D1. The token Workers Builds makes for a build may
+not: if a Deploy to Cloudflare build stops at `wrangler d1`, give its token D1 Edit in the dashboard,
+under **My Profile**, **API Tokens**, and retry the build. The deploy also stops, saying why, where
+`STORAGE_BACKEND` is anything but `do-sqlite` or `d1`, which the Worker would take for `do-sqlite`, and
+where the database holds a set-up Ember that the Worker isn't bound to, as another Ember's would. If
+that database is this Ember's own, from before it was on DO SQLite or before its Worker was made again,
+set `EMBER_ADOPT_D1_DATABASE` to the database's name in the deploy's environment, a build variable
+under the Worker's **Settings**, **Build** for a Deploy to Cloudflare copy, and deploy again. A dry run
+(`--dry-run`) leaves the database as it is. For `wrangler dev`, apply the migrations to the database on
+your machine with `pnpm --filter @ember/worker d1:migrate:local`.
 
 Both use the same schema (`apps/worker/migrations/`) and the same queries
 (`apps/worker/src/store.ts`); only the driver (`apps/worker/src/db.ts`) differs. The Workspace

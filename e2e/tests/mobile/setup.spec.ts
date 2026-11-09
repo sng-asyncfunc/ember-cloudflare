@@ -34,7 +34,24 @@ test("the setup link screen fits the phone", async ({ page, screenIsFine }) => {
   await page.route("**/api/bootstrap", (route) => route.fulfill({ json: { ...PENDING, setupAccess: "link" } }));
   await page.goto("/first_run");
   await expect(page.getByText("Ember is waiting for its administrator.")).toBeVisible();
-  await expect(page.getByText("wrangler secret put EMBER_SETUP_TOKEN")).toBeVisible();
+  await expect(page.getByText("EMBER_SETUP_PASSWORD")).toBeVisible();
+  await screenIsFine();
+});
+
+test("the setup password screen fits the phone, and so does a refused one", async ({ page, screenIsFine }) => {
+  // As a Worker deployed with Deploy to Cloudflare, whose form asked for a setup password, shows it.
+  await page.route("**/api/bootstrap", (route) => route.fulfill({ json: { ...PENDING, setupAccess: "password" } }));
+  await page.route("**/api/first_run/check", (route) => route.fulfill({ status: 403, json: { error: "That isn't this Ember's setup password" } }));
+  await page.goto("/first_run");
+  const field = page.getByLabel("Setup password");
+  await expect(field).toBeFocused();
+  await screenIsFine();
+
+  await field.fill("not the setup password");
+  await page.getByRole("button", { name: "Show password" }).tap();
+  await page.getByRole("button", { name: "Continue" }).tap();
+  await expect(page.getByRole("alert")).toHaveText("That isn't this Ember's setup password");
+  await expect(field).toHaveValue("");
   await screenIsFine();
 });
 

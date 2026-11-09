@@ -35,6 +35,7 @@ import {
   roomSql,
   roomStub,
   settle,
+  sharedD1,
   shown,
   startDirect,
   upload,
@@ -152,7 +153,7 @@ const opened = async (room: RoomId) => (await objectSql(roomStub(room), "SELECT 
 
 /** The messages `room` has, oldest first, as its database holds them: on DO SQLite, none until its object has opened one. */
 async function storedIn(room: RoomId): Promise<Array<{ id: string; creator_id: string; body: string }>> {
-  if (!(env as { DB?: D1Database }).DB && !(await opened(room))) return [];
+  if (!sharedD1() && !(await opened(room))) return [];
   return (await roomSql(room, "SELECT id, creator_id, body FROM messages WHERE room_id = ? ORDER BY id", room)) as Array<{ id: string; creator_id: string; body: string }>;
 }
 
@@ -421,7 +422,7 @@ describe("Bots post messages", () => {
 
     while ((await roomSql(general, "SELECT seq FROM unindexed_messages WHERE room_id = ?", general)).length > 0) await sleep(5);
     const found = (await (await api("/api/searches?q=deploy", { headers: { Cookie: member.cookie } })).json()) as SearchResults;
-    expect(found.messages.map((message) => message.id)).toEqual([id]);
+    expect(found.matches.map(({ message }) => message.id)).toEqual([id]);
   });
 
   it("answers an empty 422 for a body that's empty or only spaces, posting nothing", async () => {
@@ -741,7 +742,7 @@ describe("Bots edit and delete their messages", () => {
     const searched = async (query: string) => {
       while ((await roomSql(general, "SELECT seq FROM unindexed_messages WHERE room_id = ?", general)).length > 0) await sleep(5);
       const found = (await (await api(`/api/searches?q=${query}`, { headers: { Cookie: member.cookie } })).json()) as SearchResults;
-      return found.messages.map((message) => message.id);
+      return found.matches.map(({ message }) => message.id);
     };
 
     expect((await editAs(bot.key, general, id, "Nightly rollback started")).status).toBe(200);

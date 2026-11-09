@@ -19,8 +19,8 @@ import { workspace } from "./workspace";
 /** `expires_in 30.minutes, public: true, stale_while_revalidate: 1.week` */
 const CACHE_CONTROL = "max-age=1800, public, stale-while-revalidate=604800";
 
-/** Where the built app has Ember's flame, @ember's picture. */
-const FLAME = "/ember-icon.png";
+/** Where the built app has @ember's picture: Ember's flame in white on the app icon's sunset. */
+const FLAME = "/assistant-avatar.svg";
 
 /** Rails' `/users/:user_id/avatar`, which takes the token as the id. */
 const ROUTE = /^\/users\/([^/]+)\/avatar$/;
@@ -65,7 +65,7 @@ async function flame(request: Request, env: Env): Promise<Response> {
   const etag = await etagOf(bytes);
   const headers = new Headers({ ETag: etag, "Cache-Control": CACHE_CONTROL });
   if (isFresh(request, etag)) return new Response(null, { status: 304, headers });
-  headers.set("Content-Type", "image/png");
+  headers.set("Content-Type", "image/svg+xml");
   return new Response(request.method === "HEAD" ? null : bytes, { headers });
 }
 

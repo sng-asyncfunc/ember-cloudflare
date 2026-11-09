@@ -23,6 +23,16 @@ const writtenAt = (times: Map<string, string>) => (page: Page) =>
     });
   });
 
+/** A message's More actions, while it's open. */
+const moreActions = (message: Locator) => message.getByRole("group", { name: "More actions" });
+
+/** Hovers the message that says `text`, then clicks Message options, the bar's last button, and returns More actions. */
+async function openMoreActions(member: Member, text: string): Promise<Locator> {
+  await member.actions(text);
+  await member.message(text).getByRole("button", { name: "Message options" }).click();
+  return moreActions(member.message(text));
+}
+
 /** The day separator just above the message that says `text`, if it has one. */
 const separatorAbove = (member: Member, text: string) => member.message(text).locator("xpath=preceding-sibling::h2");
 
@@ -119,6 +129,23 @@ test.describe("Message rows", () => {
       await expect(body).toHaveCSS("font-size", "15px");
       await expect(body).toHaveCSS("line-height", "22px");
     }
+  });
+
+  test("leaves 12px above a new author's message and 8px between one person's", async ({ members, participant }) => {
+    await (await participant("Grace")).sayAll(["Grace starts", "Grace goes on"]);
+    const ada = await members.signIn("Ada");
+    await ada.send("Ada answers");
+    await expect(ada.message("Ada answers")).not.toHaveAttribute("aria-busy");
+    const text = (message: string) => ada.message(message).locator(".message-content");
+    // From the bottom of one message's text to the top of the next one's first line, which is its author's
+    // name where it starts a run.
+    const gap = async (above: Locator, below: Locator) => {
+      const [upper, lower] = [await box(above), await box(below)];
+      return lower.y - (upper.y + upper.height);
+    };
+
+    await expect.poll(() => gap(text("Grace starts"), text("Grace goes on"))).toBe(8);
+    await expect.poll(() => gap(text("Grace goes on"), ada.message("Ada answers").getByRole("heading", { level: 3 }))).toBe(12);
   });
 
   test("tints the row under the pointer without moving anything, in light and dark", async ({ members, participant }) => {
@@ -288,7 +315,7 @@ test.describe("Message action bar", () => {
     const bounds = await box(bar(first));
     const row = await box(first);
     const pane = await box(ada.timeline());
-    expect(bounds).toMatchObject({ width: 266, height: 42 });
+    expect(bounds).toMatchObject({ width: 234, height: 42 });
     expect(pane.x + pane.width - bounds.x - bounds.width).toBe(16);
     expect(row.y - bounds.y).toBe(17);
     // Message options is the bar's last button, and the bar overlaps the row rather than floating above it.
@@ -325,6 +352,25 @@ test.describe("Message action bar", () => {
     await expect(bar(second)).toBeHidden();
   });
 
+  test("names each button in a tooltip above it as the pointer reaches it, and shuts it as the pointer leaves", async ({ members }) => {
+    const ada = await members.signIn("Ada", { context: { viewport: { width: 1311, height: 900 } } });
+    await ada.send("Name your buttons.");
+    const actions = await ada.actions("Name your buttons.");
+    for (const [role, name] of [["button", "Clapping"], ["button", "More reactions"], ["link", "Reply in thread"], ["button", "Edit"]] as const) {
+      const control = actions.getByRole(role, { name });
+      await control.hover();
+      // The last button's may still be fading out beside it.
+      const tooltip = ada.page.getByRole("tooltip", { name });
+      await expect(tooltip).toBeVisible();
+      await tooltip.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)));
+      const [tip, under] = [await box(tooltip), await box(control)];
+      expect(tip.y + tip.height).toBeLessThanOrEqual(under.y);
+      expect(Math.abs(tip.x + tip.width / 2 - (under.x + under.width / 2))).toBeLessThan(1);
+    }
+    await ada.page.getByRole("heading", { level: 1 }).hover();
+    await expect(ada.page.getByRole("tooltip")).toHaveCount(0);
+  });
+
   test("opens from Message options by keyboard, staying open without the pointer, until Escape", async ({ members, participant }) => {
     await (await participant("Grace")).say("Reach me by keyboard");
     const ada = await members.signIn("Ada");
@@ -350,6 +396,8 @@ test.describe("Message action bar", () => {
     await ada.page.keyboard.press("Enter");
     await ada.page.keyboard.press("Tab");
     await expect(bar(message).getByRole("button", { name: "Thumbs up" })).toBeFocused();
+    // Focus names nothing, as the pointer does, so Escape goes on shutting the bar.
+    await expect(ada.page.getByRole("tooltip")).toHaveCount(0);
     await ada.page.keyboard.press("Enter");
     await expect(message.getByRole("list", { name: "Reactions" })).toContainText("👍");
     // Sending a reaction closes the bar and hands focus back to Message options.
@@ -379,8 +427,10 @@ test.describe("Message action bar", () => {
     await expect(tray).toContainText("More reactions");
     expect(Math.abs((await box(quick)).y - quickBefore.y)).toBeLessThan(1);
     expect((await box(tray)).y).toBeGreaterThan(quickBefore.y);
-    await ada.page.keyboard.press("Tab");
+    // The tray opens at its first reaction, as Reply in thread and Edit follow More reactions on the bar.
     await expect(tray.getByRole("button", { name: "Muscle" })).toBeFocused();
+    // The click shut the tooltip that named More reactions as the pointer reached it, which takes Escape until it has faded.
+    await expect(ada.page.getByRole("tooltip")).toHaveCount(0);
     await ada.page.keyboard.press("Escape");
     await expect(tray).toBeHidden();
     await expect(more).toBeFocused();
@@ -479,16 +529,17 @@ test.describe("Message action bar", () => {
     await expect(message).not.toHaveAttribute("aria-busy");
     const options = message.getByRole("button", { name: "Message options" });
     await options.tap();
+    // The reactions go in the first row, and Reply in thread starts the second, which Edit ends.
     const first = await box(bar(message).getByRole("button", { name: "Thumbs up" }));
-    const thread = await box(bar(message).getByRole("link", { name: "Reply in thread" }));
-    const quote = await box(bar(message).getByRole("button", { name: "Quote" }));
     const more = await box(bar(message).getByRole("button", { name: "More reactions" }));
-    expect(thread).toMatchObject({ x: first.x + 3 * 44, y: first.y });
-    expect(quote).toMatchObject({ x: first.x, y: first.y + 44 });
-    expect(more).toMatchObject({ x: thread.x, y: quote.y });
+    const thread = await box(bar(message).getByRole("link", { name: "Reply in thread" }));
+    const edit = await box(bar(message).getByRole("button", { name: "Edit" }));
+    expect(more).toMatchObject({ x: first.x + 3 * 44, y: first.y });
+    expect(thread).toMatchObject({ x: first.x, y: first.y + 44 });
+    expect(edit).toMatchObject({ x: more.x, y: thread.y });
     // Lined up with Message options' right edge, as far as the timeline lets it.
     const trigger = await box(options);
-    expect(thread.x + thread.width + 5).toBe(Math.min(trigger.x + trigger.width, 320 - 8));
+    expect(more.x + more.width + 5).toBe(Math.min(trigger.x + trigger.width, 320 - 8));
   });
 
   test("opens the bar below Message options on touch screens where there's room", async ({ members, participant }) => {
@@ -544,22 +595,14 @@ test.describe("Message action bar", () => {
 });
 
 test.describe("More actions on a message", () => {
-  const moreActions = (message: Locator) => message.getByRole("group", { name: "More actions" });
-
-  /** Hovers the message that says `text`, then clicks Message options, the bar's last button, and returns More actions. */
-  async function openMoreActions(member: Member, text: string): Promise<Locator> {
-    await member.actions(text);
-    await member.message(text).getByRole("button", { name: "Message options" }).click();
-    return moreActions(member.message(text));
-  }
-
   test("opens under the bar from its last button, keeping the bar open, and Escape shuts it, then the bar", async ({ members }) => {
     const ada = await members.signIn("Ada", { context: { viewport: { width: 1311, height: 900 } } });
     await ada.send("Show me more.");
     const message = ada.message("Show me more.");
     const actions = await ada.actions("Show me more.");
     const options = message.getByRole("button", { name: "Message options" });
-    await expect(options).toHaveAttribute("title", "More actions");
+    await options.hover();
+    await expect(ada.page.getByRole("tooltip", { name: "More actions" })).toBeVisible();
     const bar = await box(actions);
     const quick = await box(actions.getByRole("group", { name: "Quick reactions" }));
 
@@ -680,18 +723,20 @@ test.describe("Quote a message", () => {
 });
 
 test.describe("Copy a link to a message", () => {
-  test("copies the message's address, keeping the bar open and turning Copy link green", async ({ members, participant, rooms, baseURL }) => {
+  test("copies the message's address from More actions, keeping it open and turning Copy link green", async ({ members, participant, rooms, baseURL }) => {
     await (await participant("Grace")).say("Link to me");
     const ada = await members.signIn("Ada");
     await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-    const actions = await ada.actions("Link to me");
-    const copy = actions.getByRole("button", { name: "Copy link" });
+    // With a mouse, it's in More actions rather than on the bar.
+    await expect((await ada.actions("Link to me")).getByRole("button", { name: "Copy link" })).toHaveCount(0);
+    const panel = await openMoreActions(ada, "Link to me");
+    const copy = panel.getByRole("button", { name: "Copy link" });
     const color = await copy.evaluate((button) => getComputedStyle(button).color);
     await copy.click();
     await expect(copy).not.toHaveCSS("color", color);
     const link = await ada.page.evaluate(() => navigator.clipboard.readText());
     expect(link).toMatch(new RegExp(`^${baseURL}/rooms/${rooms.general.id}/@[^/]+$`));
-    await expect(actions).toBeVisible();
+    await expect(panel).toBeVisible();
   });
 });
 
@@ -700,7 +745,7 @@ test.describe("Link to a message", () => {
     await (await participant("Grace")).say("Find me later");
     const ada = await members.signIn("Ada");
     await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-    await (await ada.actions("Find me later")).getByRole("button", { name: "Copy link" }).click();
+    await (await openMoreActions(ada, "Find me later")).getByRole("button", { name: "Copy link" }).click();
     const path = new URL(await ada.page.evaluate(() => navigator.clipboard.readText())).pathname;
 
     const grace = await members.signIn("Grace", { path });
@@ -713,7 +758,7 @@ test.describe("Link to a message", () => {
     await (await participant("Grace")).say("Find me again");
     const ada = await members.signIn("Ada");
     await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-    await (await ada.actions("Find me again")).getByRole("button", { name: "Copy link" }).click();
+    await (await openMoreActions(ada, "Find me again")).getByRole("button", { name: "Copy link" }).click();
     const permalink = new URL(await ada.page.evaluate(() => navigator.clipboard.readText())).pathname;
 
     const grace = await members.signIn("Grace", { path: permalink.replace("/@", "/messages/") });

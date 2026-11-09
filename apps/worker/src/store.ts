@@ -1,10 +1,10 @@
 import { PARENT_TEXT_LENGTH, parentTextOf, THREAD_FACES, type Boost, type Card, type Message, type RoomId, type ThreadSummary, type TimelinePage, type User, type UserId } from "@ember/protocol";
-import type { PreparedBody } from "@ember/richtext";
+import { hasLinkable, type PreparedBody } from "@ember/richtext";
 import { statement, type Db, type Statement } from "./db";
 import { fileSigner, type FileUrls } from "./files/addresses";
 import { deletingAllFiles, deletingFilesOf, type AttachedFile } from "./files/blobs";
 import { logEvent, logIndexing, logIndexingEach, logIndexingReplies } from "./room-log";
-import type { IndexedMessage } from "./search-index";
+import type { IndexedMessage, SearchFacts } from "./search-index";
 
 // Messages for one room, kept in the room's Durable Object SQLite storage or in D1 (see db.ts), each
 // with the number of its latest change, and the deletions a tab that connects again may yet need to
@@ -141,6 +141,29 @@ function deepFreeze<T>(value: T): T {
 function logIndexingRepliesTo(roomId: RoomId, message: Message, plainText: string): Statement[] {
   const retold = message.thread !== undefined && parentTextOf(message.plainText) !== parentTextOf(plainText);
   return retold ? [logIndexingReplies(roomId, JSON.stringify([message.id]))] : [];
+}
+
+/** A link written as one, in a message's markup or its cards'. */
+const WRITTEN_LINK = /<a\s[^>]*\bhref=/i;
+
+/**
+ * What search filters narrow a search by, as the search index keeps it: who wrote the message, its
+ * thread's id, which is its own for a message with replies, whether its text or cards have a link, whether
+ * it has a file, and whom it mentions. A link is one written as one, an address its text or cards show as
+ * one (`hasLinkable`), or any other address in its cards; a file message shows its file in place of its
+ * text, which is the file's name.
+ */
+function searchFactsOf(row: MessageRow): SearchFacts {
+  return {
+    creatorId: row.creator_id,
+    threadId: row.parent_id ?? (threadOf(row) ? row.id : null),
+    hasLink:
+      WRITTEN_LINK.test(row.body) ||
+      (row.attachment === null && hasLinkable(row.plain_text)) ||
+      (row.cards !== null && (WRITTEN_LINK.test(row.cards) || hasLinkable(row.cards))),
+    hasFile: row.attachment !== null,
+    mentionIds: [...new Set((JSON.parse(row.mentions) as (User | UserId)[]).map((person) => (typeof person === "string" ? person : person.id)))],
+  };
 }
 
 /** A message's thread, from its row, if it has replies. */
@@ -461,7 +484,7 @@ export class MessageStore {
     return rows.flatMap((row) => {
       if (row.deleted === 1) return [];
       const message = JSON.stringify(row);
-      return [{ id: row.id, createdAt: row.created_at, text: row.plain_text, message: message.length <= MAX_INDEXED_ROW ? message : null }];
+      return [{ id: row.id, createdAt: row.created_at, text: row.plain_text, message: message.length <= MAX_INDEXED_ROW ? message : null, ...searchFactsOf(row) }];
     });
   }
 

@@ -26,14 +26,20 @@
   },
   "cloudflare": {
     "bindings": {
+      "EMBER_SETUP_PASSWORD": {
+        "description": "Make up a setup password nobody would guess. Ember's setup page asks for it once, so only you can set Ember up. Forgot it? Change it in the Worker's Settings, under Variables and Secrets."
+      },
       "EMAIL": {
         "description": "Cloudflare Email Service, which sends Ember's email once your account is on Workers Paid and has a domain onboarded to Email Sending."
       },
       "FILES": {
-        "description": "The R2 bucket for the files people upload to rooms. Any name works; the deploy creates it if your account has none by that name."
+        "description": "The R2 bucket for the files people upload to rooms. Each Ember needs its own, so if the bucket picked here is another Ember's, choose Create new and give it any name."
       },
       "STORAGE_BACKEND": {
-        "description": "Where messages live. Keep `do-sqlite`, which needs nothing more; `d1` also needs a D1 database bound as `DB` (see docs/self-hosting.md)."
+        "description": "Where messages live. Keep `do-sqlite`: each room keeps its own, which scales furthest. Or type `d1` for one database you can query, export and restore. Switching later starts an empty Ember."
+      },
+      "DB": {
+        "description": "Holds messages only if STORAGE_BACKEND is `d1`, up to 500 MB on Workers Free or 10 GB on Workers Paid. Each Ember needs its own, so if this is another Ember's, choose Create new."
       }
     }
   }

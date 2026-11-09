@@ -13,10 +13,11 @@ import { railsJson } from "./rails-json";
 // Redirects aren't followed, and nothing is retried.
 
 /**
- * How long a webhook has to answer, connecting included, and then to send each part of its answer:
- * `Webhook::ENDPOINT_TIMEOUT`, which Net::HTTP gives connecting and each read.
+ * How long a webhook has to answer, connecting included, and then to send each part of its answer, as
+ * Net::HTTP times connecting and each read: 30 seconds, where Campfire's `Webhook::ENDPOINT_TIMEOUT` is
+ * 7, so that a bot that asks an AI model or another slow service has time to answer.
  */
-export const ENDPOINT_TIMEOUT_MS = 7_000;
+export const ENDPOINT_TIMEOUT_MS = 30_000;
 
 /**
  * The most a delivery may take in all, so that a webhook that keeps sending a little at a time can't

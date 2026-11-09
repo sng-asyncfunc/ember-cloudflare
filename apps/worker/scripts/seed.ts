@@ -7,7 +7,8 @@
 //   pnpm seed                            # in another terminal, for http://localhost:5173
 //   pnpm seed https://ember.example.com  # a deployment nobody has set up yet
 //
-// A deployment takes the setup token its deploy printed, in EMBER_SETUP_TOKEN. Everyone's password is
+// A deployment takes its setup password, in EMBER_SETUP_PASSWORD, or the setup token its deploy printed,
+// in EMBER_SETUP_TOKEN. Everyone's password is
 // EMBER_SEED_PASSWORD, or one the seed makes up and prints. To seed `pnpm dev`'s Ember again, stop it
 // and delete apps/worker/.wrangler/state, which holds it.
 
@@ -24,7 +25,7 @@ import { workerUrl } from "./worker-url.ts";
 /** Where `pnpm dev` serves Ember: Vite, which passes on to `wrangler dev` everything the Worker serves. */
 const DEV_URL = "http://localhost:5173";
 
-const USAGE = "Usage: pnpm seed [Ember's address], with a deployment's setup token in EMBER_SETUP_TOKEN";
+const USAGE = "Usage: pnpm seed [Ember's address], with a deployment's setup password in EMBER_SETUP_PASSWORD, or its setup token in EMBER_SETUP_TOKEN";
 
 const FILES = path.join(import.meta.dirname, "seed", "files");
 
@@ -94,7 +95,7 @@ async function main(args: string[], env: NodeJS.ProcessEnv): Promise<string> {
   if (args.length > 1) throw new UsageError(USAGE);
   const url = workerUrl(args[0] ?? DEV_URL);
   if (!url) throw new UsageError(`${USAGE}. The address has to be HTTPS, or HTTP on this machine.`);
-  const ember = new Ember(url.origin, env.EMBER_SETUP_TOKEN);
+  const ember = new Ember(url.origin, env.EMBER_SETUP_PASSWORD || env.EMBER_SETUP_TOKEN);
   const password = passwordOf(env.EMBER_SEED_PASSWORD);
   if (await ember.isSetUp()) {
     const startOver = ember.origin === DEV_URL ? " To start `pnpm dev`'s over, stop it and delete apps/worker/.wrangler/state." : "";

@@ -8,12 +8,12 @@ import {
   type AssistantSaved,
   type AssistantSetup,
 } from "@ember/protocol/assistant";
-import { MENTION_CONTENT_TYPE, mentionSgid } from "@ember/richtext";
+import { MENTION_CONTENT_TYPE, mentionPromptItem, mentionSgid } from "@ember/richtext";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GATEWAY_UNANSWERED, NOTHING_ANSWERED } from "../src/assistant/gateway";
 import { API_TOKEN_CHANGED, API_TOKEN_NEEDED } from "../src/assistant/settings";
 import type { Env } from "../src/env";
-import { api, apiWith, connect, cookieOf, createRoom, freshDeploy, openWorkspaceSocket, post, shown, startDirect, workspaceSql, type Session } from "./support";
+import { api, apiWith, connect, cookieOf, createRoom, freshDeploy, openWorkspaceSocket, post, shown, startDirect, WITH_THE_FLAME, workspaceSql, type Session } from "./support";
 
 // Ember AI's setup on the AI assistant tab, the @ember account it adds, and its reserved name.
 
@@ -26,6 +26,8 @@ const API_TOKEN = "an-api-token-with-workers-ai-read_0123456";
 /** What Set up Ember AI sends for Claude Sonnet. */
 const SETUP = { accountId: ACCOUNT_ID, apiToken: API_TOKEN, model: "anthropic/claude-sonnet-5.5" } satisfies AssistantSetup;
 const CLOUDFLARE_API = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/v1`;
+/** Claude Sonnet, as Ember lists it among the models people can pick. */
+const CLAUDE = { id: SETUP.model, name: "Claude Sonnet 5.5", format: "messages" } as const;
 const HELLO = "Hello, team! Mention @ember whenever you'd like a hand.";
 
 /** Sets Ember up with Ada as its administrator, signed in. */
@@ -131,7 +133,7 @@ describe("Ember AI", () => {
       const response = await setUpAssistant(administrator, { ...SETUP, accountId: ` ${ACCOUNT_ID.toUpperCase()} `, apiToken: ` ${API_TOKEN}\n` });
       expect(response.status, await response.clone().text()).toBe(200);
       expect(response.headers.get("Cache-Control")).toBe("no-store");
-      expect(await response.json()).toEqual({ assistant: { accountId: ACCOUNT_ID, model: SETUP.model, most: TOP_LEVELS }, greeting: HELLO } satisfies AssistantSaved);
+      expect(await response.json()).toEqual({ assistant: { accountId: ACCOUNT_ID, model: SETUP.model, models: [CLAUDE], most: TOP_LEVELS, webTools: [], ...WITH_THE_FLAME }, greeting: HELLO } satisfies AssistantSaved);
 
       // Claude takes Anthropic's Messages, with the instructions as its system prompt.
       expect(requests).toEqual([{ url: `${CLOUDFLARE_API}/messages`, authorization: `Bearer ${API_TOKEN}`, gateway: "default", body: expect.any(Object) as unknown }]);
@@ -143,10 +145,31 @@ describe("Ember AI", () => {
       });
 
       // The database holds the API token sealed, never as it was given.
-      expect((await storedSettings()).assistant).toEqual({ account_id: ACCOUNT_ID, api_token: expect.stringMatching(/^v1\.[\w-]{16}\.[\w-]+$/) as unknown, model: SETUP.model, format: "messages" });
+      // Searching the web waits for Search the web to be turned on.
+      expect((await storedSettings()).assistant).toEqual({
+        account_id: ACCOUNT_ID,
+        api_token: expect.stringMatching(/^v1\.[\w-]{16}\.[\w-]+$/) as unknown,
+        model: SETUP.model,
+        format: "messages",
+        models: [CLAUDE],
+        web_tools: [],
+        web_tools_asked_at: expect.any(String) as unknown,
+      });
       expect(JSON.stringify(await workspaceSql("SELECT * FROM accounts"))).not.toContain(API_TOKEN);
-      expect(await assistantSettings(administrator)).toEqual({ accountId: ACCOUNT_ID, model: SETUP.model, most: TOP_LEVELS });
+      expect(await assistantSettings(administrator)).toEqual({ accountId: ACCOUNT_ID, model: SETUP.model, models: [CLAUDE], most: TOP_LEVELS, webTools: [], ...WITH_THE_FLAME });
       expect(await assistantSettings(member)).toBeNull();
+    });
+
+    it("gives administrators the Cloudflare account the deploy said Ember is in, to fill in, once it can be an account's ID", async () => {
+      const administrator = await setUp();
+      const member = await joinAsGrace();
+      const deployedTo = async (session: Session, given: string | undefined) =>
+        ((await (await apiWith({ CLOUDFLARE_ACCOUNT_ID: given }, "/api/account", { headers: as(session) })).json()) as WorkspaceSettings).cloudflareAccountId;
+
+      expect(await deployedTo(administrator, ` ${ACCOUNT_ID.toUpperCase()}\n`)).toBe(ACCOUNT_ID);
+      expect(await deployedTo(member, ACCOUNT_ID)).toBeNull();
+      expect(await deployedTo(administrator, "my-account")).toBeNull();
+      expect(await deployedTo(administrator, undefined)).toBeNull();
     });
 
     it("adds @ember, a bot named Ember that nobody can sign in as, in every open room, and tells everyone's workspace sockets", async () => {
@@ -182,6 +205,21 @@ describe("Ember AI", () => {
       client.close();
     });
 
+    it("is offered in the mentions prompt badged as an agent, as nobody else is", async () => {
+      const administrator = await setUp();
+      fakeGateway();
+      await saved(administrator);
+      const [room] = await openRooms();
+      const response = await api(`/api/autocompletable/users?room_id=${room}`, { headers: as(administrator) });
+      expect(response.status, await response.clone().text()).toBe(200);
+      const { users } = (await (await api("/api/users", { headers: as(administrator) })).json()) as Directory;
+      const card = (userId: string) => {
+        const { id, name, avatarUrl } = users.find((user) => user.id === userId)!;
+        return { id, name, avatarUrl };
+      };
+      expect(await response.text()).toBe(mentionPromptItem(card(administrator.user.id)) + mentionPromptItem({ ...card(ASSISTANT_ID), agent: true }));
+    });
+
     it("keeps the API token it has when a change gives none, and needs one when it has none", async () => {
       const administrator = await setUp();
       const requests = fakeGateway();
@@ -195,7 +233,15 @@ describe("Ember AI", () => {
       await saved(administrator);
       const sealed = ((await storedSettings()).assistant as { api_token: string }).api_token;
       const changed = await saved(administrator, { ...withoutToken, model: "openai/gpt-6.1-sol" });
-      expect(changed.assistant).toEqual({ accountId: ACCOUNT_ID, model: "openai/gpt-6.1-sol", most: TOP_LEVELS });
+      // In place of the model it answered everyone with.
+      expect(changed.assistant).toEqual({
+        accountId: ACCOUNT_ID,
+        model: "openai/gpt-6.1-sol",
+        models: [{ id: "openai/gpt-6.1-sol", name: "GPT-6.1 Sol", format: "responses" }],
+        most: TOP_LEVELS,
+        webTools: [],
+        ...WITH_THE_FLAME,
+      });
       expect(requests.map(({ url, authorization }) => [url, authorization])).toEqual([
         [`${CLOUDFLARE_API}/messages`, `Bearer ${API_TOKEN}`],
         [`${CLOUDFLARE_API}/responses`, `Bearer ${API_TOKEN}`],
@@ -417,21 +463,21 @@ describe("Ember AI", () => {
       expect(await storedAssistant()).toMatchObject({ name: "Ember", status: 0 });
     });
 
-    it("has Ember's flame as its picture", async () => {
+    it("has Ember's flame on the sunset as its picture", async () => {
       const administrator = await setUp();
       fakeGateway();
       await saved(administrator);
       vi.restoreAllMocks();
-      const flame = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 3);
+      const flame = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36"><rect width="36" height="36" fill="#FF5F0F"/></svg>';
       const builtFiles = {
         fetch: async (input: Request | string | URL) =>
-          new URL(input instanceof Request ? input.url : input).pathname === "/ember-icon.png" ? new Response(flame) : new Response("Not found", { status: 404 }),
+          new URL(input instanceof Request ? input.url : input).pathname === "/assistant-avatar.svg" ? new Response(flame) : new Response("Not found", { status: 404 }),
       } as unknown as Fetcher;
       const { avatarUrl } = (await inDirectory(administrator, ASSISTANT_ID))!;
       const response = await apiWith({ ASSETS: builtFiles }, avatarUrl, { headers: as(administrator) });
       expect(response.status).toBe(200);
-      expect(response.headers.get("Content-Type")).toBe("image/png");
-      expect(new Uint8Array(await response.arrayBuffer())).toEqual(flame);
+      expect(response.headers.get("Content-Type")).toBe("image/svg+xml");
+      expect(await response.text()).toBe(flame);
     });
   });
 });

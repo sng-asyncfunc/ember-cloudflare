@@ -9,6 +9,7 @@ import { isSignedOut, startDirect } from "@/lib/api";
 import { PEOPLE_PAGE, peopleMatching, soughtName } from "@/lib/directs";
 import type { RoomAnswer } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
+import { AgentBadge, isAssistant } from "./agent-badge";
 import { UserAvatar } from "./user-avatar";
 
 // The New direct message dialog. It lists the people directory the page already has, so it searches as
@@ -35,10 +36,10 @@ export function opensNewDirect(open: (opener: HTMLElement) => void) {
 }
 
 /**
- * Puts focus back on what opened the dialog, or, when that's gone with the drawer it was in, on the
+ * Puts focus back on what opened a dialog, or, when that's gone with the drawer it was in, on the
  * drawer's toggle.
  */
-function returnFocus(opener: HTMLElement | null) {
+export function returnFocus(opener: HTMLElement | null) {
   opener?.focus({ preventScroll: true });
   if (opener && document.activeElement === opener) return;
   document.querySelector<HTMLElement>("[data-ember-sidebar-toggle]")?.focus({ preventScroll: true });
@@ -299,7 +300,10 @@ export function NewDirectDialog({ opener, meId, reloadPeople, askForRoom, onClos
                   className="flex min-h-14 w-full cursor-pointer items-center gap-3 rounded-[9px] px-2 py-2.5 text-start text-foreground hover:bg-hover aria-selected:bg-hover"
                 >
                   <UserAvatar user={person} />
-                  <span className="min-w-0 wrap-anywhere">{nameOf(person)}</span>
+                  <span className="min-w-0 wrap-anywhere">
+                    {nameOf(person)}
+                    {isAssistant(person) && <AgentBadge className="ms-0.5" />}
+                  </span>
                 </button>
               ))}
             </div>

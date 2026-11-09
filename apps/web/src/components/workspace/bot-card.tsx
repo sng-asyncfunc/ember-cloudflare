@@ -5,12 +5,14 @@ import { Button } from "@/components/ui/button";
 import { dateTimeLabel } from "@/lib/messages";
 import { cn } from "@/lib/utils";
 import { MessageBody, MessageLink, RemoteImage } from "./message-body";
+import { Marked } from "./search-marks";
 
 // A bot's cards (packages/protocol/src/cards.ts), which a Slack-compatible webhook's legacy attachments and
 // Block Kit blocks show under its message, framed as a link preview is (message-body.tsx) and laid out as Slack
 // lays out an attachment and its blocks. The room kept only addresses on named hosts, and each is checked again
 // here against the page's own host, which a card can't aim at, as a link preview can't, since every reader's
-// browser would fetch it signed in.
+// browser would fetch it signed in. A search's results mark what it matched in all of a card's text, as it
+// searched all of it.
 
 /** The bars of Slack's named colors, in Ember's: a notice's green, the warning amber and an alert's red. */
 const BARS = new Map([
@@ -96,7 +98,7 @@ function Part({ part, titleId }: { part: CardPart; titleId?: string }) {
     case "header":
       return (
         <h4 id={titleId} className="text-[18px] leading-[24px] font-bold wrap-anywhere text-message-ink">
-          {part.text}
+          <Marked>{part.text}</Marked>
         </h4>
       );
     case "text":
@@ -172,7 +174,11 @@ function Fields({ fields }: { fields: CardField[] }) {
     <div className="grid grid-cols-2 gap-x-[2ch] gap-y-2 pt-1 @max-[400px]:grid-cols-1">
       {fields.map((field, index) => (
         <div key={index} className={cn("min-w-0", !field.short && "col-span-full")}>
-          {field.title !== undefined && <div className="text-[13px] leading-[18px] font-semibold wrap-anywhere text-message-muted">{field.title}</div>}
+          {field.title !== undefined && (
+            <div className="text-[13px] leading-[18px] font-semibold wrap-anywhere text-message-muted">
+              <Marked>{field.title}</Marked>
+            </div>
+          )}
           {field.html !== "" && <CardText html={field.html} />}
         </div>
       ))}
@@ -190,7 +196,11 @@ function Image({ image, title }: { image: CardImage; title?: string }) {
   if (!shown) return null;
   return (
     <figure className="flex min-w-0 flex-col gap-1 pt-1">
-      {title !== undefined && <figcaption className="text-[13px] leading-[18px] wrap-anywhere text-message-muted">{title}</figcaption>}
+      {title !== undefined && (
+        <figcaption className="text-[13px] leading-[18px] wrap-anywhere text-message-muted">
+          <Marked>{title}</Marked>
+        </figcaption>
+      )}
       <MessageLink href={shown.url} aria-label={shown.alt === "" ? `Image from ${new URL(shown.url).hostname}` : undefined} className="block w-fit max-w-full">
         <RemoteImage src={shown.url} alt={shown.alt} className="max-h-[500px] max-w-[min(100%,360px)] rounded-[6px] object-contain" />
       </MessageLink>
@@ -282,8 +292,16 @@ function Tile({ tile, inRow }: { tile: CardTile; inRow: boolean }) {
           <div className="flex min-w-0 items-center gap-[1ch]">
             {icon && <RemoteImage src={icon.url} alt={icon.alt} className="size-8 shrink-0 rounded-[6px] object-cover" />}
             <div className="min-w-0">
-              {tile.title !== undefined && <div className="text-[15px] leading-[22px] font-semibold wrap-anywhere text-message-ink">{tile.title}</div>}
-              {tile.subtitle !== undefined && <div className="text-[13px] leading-[18px] wrap-anywhere text-message-muted">{tile.subtitle}</div>}
+              {tile.title !== undefined && (
+                <div className="text-[15px] leading-[22px] font-semibold wrap-anywhere text-message-ink">
+                  <Marked>{tile.title}</Marked>
+                </div>
+              )}
+              {tile.subtitle !== undefined && (
+                <div className="text-[13px] leading-[18px] wrap-anywhere text-message-muted">
+                  <Marked>{tile.subtitle}</Marked>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -318,7 +336,9 @@ function Buttons({ buttons, className }: { buttons: CardButton[]; className?: st
           className={cn("max-w-full touch:min-h-11", style === "danger" && "bg-negative-button text-white hover:bg-negative-button/90")}
         >
           <MessageLink href={href}>
-            <span className="truncate">{text}</span>
+            <span className="truncate">
+              <Marked>{text}</Marked>
+            </span>
           </MessageLink>
         </Button>
       ))}
@@ -332,7 +352,11 @@ function Footer({ text, icon, at }: { text?: string; icon?: string; at?: number 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-[0.5ch] pt-1 text-xs text-message-muted">
       <Icon url={icon} />
-      {text !== undefined && <span className="min-w-0 wrap-anywhere">{text}</span>}
+      {text !== undefined && (
+        <span className="min-w-0 wrap-anywhere">
+          <Marked>{text}</Marked>
+        </span>
+      )}
       {text !== undefined && moment && <span aria-hidden>·</span>}
       {moment && <time dateTime={moment.toISOString()}>{dateTimeLabel(moment)}</time>}
     </div>
@@ -350,10 +374,10 @@ function Linked({ href, className, children }: { href?: string; className?: stri
   const shown = href && shownAddress(href);
   return shown ? (
     <MessageLink href={shown} className={cn("hover:underline", className)}>
-      {children}
+      <Marked>{children}</Marked>
     </MessageLink>
   ) : (
-    children
+    <Marked>{children}</Marked>
   );
 }
 

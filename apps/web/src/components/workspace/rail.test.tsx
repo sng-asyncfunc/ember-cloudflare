@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountContext } from "@/hooks/use-account";
 import { Rail, type Activity, type RailPage } from "./rail";
+import { OpenSearchContext } from "./search-box";
 
 const ada = { id: "u1", name: "Ada Lovelace", administrator: false };
 const activityOff: Activity = { on: false, unread: 0, onToggle: () => {} };
@@ -120,16 +121,22 @@ describe("Rail", () => {
   });
 });
 
-describe("Search page", () => {
-  it("links Search to the search page, marked while it shows, whatever's searched for", async () => {
-    const { rerender } = render(railAt("home"));
+describe("Search box", () => {
+  it("opens the search box in place from Search, which a click with a modifier key leaves to the browser, marked while the search page shows", async () => {
+    const openSearch = vi.fn();
+    const { rerender } = render(<OpenSearchContext value={openSearch}>{railAt("home")}</OpenSearchContext>);
     const search = screen.getByRole("link", { name: "Search" });
     expect(search).toHaveAttribute("href", "/searches");
     expect(search).not.toHaveAttribute("aria-current");
-    rerender(railAt("search"));
-    expect(screen.queryAllByRole("link", { current: "page" })).toEqual([search]);
     await userEvent.click(search);
-    expect(location.pathname).toBe("/searches");
+    expect(openSearch).toHaveBeenCalledExactlyOnceWith({ opener: search });
+    expect(location.pathname).toBe("/");
+
+    openSearch.mockClear();
+    expect(fireEvent.click(search, { metaKey: true })).toBe(true);
+    expect(openSearch).not.toHaveBeenCalled();
+    rerender(<OpenSearchContext value={openSearch}>{railAt("search")}</OpenSearchContext>);
+    expect(screen.queryAllByRole("link", { current: "page" })).toEqual([search]);
   });
 });
 

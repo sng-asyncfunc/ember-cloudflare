@@ -27,6 +27,10 @@ points the favicon at the logo's 192-pixel variant, and only the Apple touch ico
 one (`hooks/use-account-logo.ts`).
 `ember-icon.png` is Ember's flame, on the rail and the sign-in card, scaled from 1254px down to 192px,
 so the page doesn't load 595 KB for a 44px mark.
+`assistant-avatar.svg` is @ember's avatar, which the Worker serves as its picture: the flame's outline,
+traced from `logos/app-icon.png`, in white on the app icon's sunset. It fills its square, which the app
+cuts to the circle every bot's avatar is, since the initials drawn behind an avatar would show through
+anything left clear.
 `browsers/` holds Campfire's browser logos, byte for byte, for the Worker's "Upgrade to a supported web
 browser" page, and `globe.svg` is Iconoir's globe, byte for byte, for that page's translation button.
 They're static files rather than icons here because that page is plain HTML from the Worker, which

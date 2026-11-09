@@ -40,16 +40,22 @@ export function mentionContent({ id, name, avatarUrl }: MentionCard): string {
   return `<span class="mention" sgid="${htmlEscape(mentionSgid(id))}">${avatarTag(avatarUrl)} ${htmlEscape(name)}</span>`;
 }
 
+/** Someone as Lexxy's mentions prompt offers them: as a mention shows them, and whether they're an AI agent, as @ember is. */
+export interface PromptCard extends MentionCard {
+  agent?: boolean;
+}
+
 /**
  * Campfire's autocompletable/users/_prompt_item.html.erb: someone as Lexxy's mentions prompt offers
- * them, by their avatar and name, and the mention picking them writes. Unlike Campfire's, the avatar
- * isn't a link: a click anywhere on someone listed picks them, and screen readers can't reach a link in
- * a list's option, whose content ARIA makes presentational.
+ * them, by their avatar and name, with a badge saying so after an agent's, and the mention picking them
+ * writes. Unlike Campfire's, the avatar isn't a link: a click anywhere on someone listed picks them, and
+ * screen readers can't reach a link in a list's option, whose content ARIA makes presentational.
  */
-export function mentionPromptItem(person: MentionCard): string {
+export function mentionPromptItem(person: PromptCard): string {
   const name = htmlEscape(person.name);
+  const badge = person.agent ? ` <span class="autocompletable__badge">Agent</span>` : "";
   return `<lexxy-prompt-item search="${name}" sgid="${htmlEscape(mentionSgid(person.id))}">
-  <template type="menu"><span class="autocomplete__item">${avatarTag(person.avatarUrl)}<span class="autocompletable__name">${name}</span></span></template>
+  <template type="menu"><span class="autocomplete__item">${avatarTag(person.avatarUrl)}<span class="autocompletable__name">${name}</span>${badge}</span></template>
   <template type="editor">${mentionContent(person)}</template>
 </lexxy-prompt-item>
 `;

@@ -240,8 +240,10 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
     // for the reader instead of retrying in a loop.
     const shown = state.messages;
     const root = scroller.current;
-    const older = new IntersectionObserver(([entry]) => entry?.isIntersecting && loadOlder(shown), { root, rootMargin: `${PAGE_AHEAD_PX}px 0px 0px 0px` });
-    const newer = new IntersectionObserver(([entry]) => entry?.isIntersecting && loadNewer(shown), { root, rootMargin: `0px 0px ${PAGE_AHEAD_PX}px 0px` });
+    // An observer can tell of more than one look at once, oldest first, as when the reader scrolls to the top
+    // before it has told of the place a page kept them in, so the last says where the end is now.
+    const older = new IntersectionObserver((entries) => entries.at(-1)?.isIntersecting && loadOlder(shown), { root, rootMargin: `${PAGE_AHEAD_PX}px 0px 0px 0px` });
+    const newer = new IntersectionObserver((entries) => entries.at(-1)?.isIntersecting && loadNewer(shown), { root, rootMargin: `0px 0px ${PAGE_AHEAD_PX}px 0px` });
     older.observe(top.current!);
     newer.observe(bottom.current!);
     return () => {

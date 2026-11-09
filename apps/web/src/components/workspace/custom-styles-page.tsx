@@ -7,8 +7,9 @@ import { useMounted } from "@/hooks/use-mounted";
 import { navigate, WORKSPACE_SETTINGS_PATH } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
 import { ApiError, changeCustomStyles, fetchCustomStyles, isSignedOut } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { NavigationIconSettings } from "./navigation-icon-settings";
-import { Panel, SettingsPage } from "./settings-page";
+import { Panel, SettingsPage, TITLE } from "./settings-page";
 
 interface Props {
   /**
@@ -82,7 +83,8 @@ export function CustomStylesPage({ askForAccount, onFailed }: Props) {
             <TranslationButton translations="custom_styles" />
           </div>
           <div className="mx-[1ch] px-[2ch] max-md:px-3">
-            <h1 id="custom-styles-heading" className="text-[23px] font-bold">
+            {/* Set, and spaced from what it says, as the other sections' titles are. */}
+            <h1 id="custom-styles-heading" className={cn("mb-1.5", TITLE)}>
               Custom CSS
             </h1>
             <p className="mb-[1em] flex flex-wrap items-center justify-center gap-x-[0.5ch]">

@@ -16,7 +16,7 @@ function answerOf(url: string, authorization: string | undefined): Answer {
   if (url === "/api/health") return { status: 200, body: JSON.stringify(authorization === `Bearer ${TOKEN}` ? { ok: true, storage: "do-sqlite" } : { ok: true }) };
   if (url === "/") return { status: 200, body: '<div id="root"></div>', headers: { "X-Content-Type-Options": "nosniff" } };
   if (url === "/api/me") return { status: 401, body: "{}" };
-  if (url === "/api/bootstrap") return { status: 200, body: JSON.stringify({ setup: "complete" }) };
+  if (url === "/api/bootstrap") return { status: 200, body: JSON.stringify(bootstrap) };
   return { status: 404, body: "<title>We can’t find that (404)</title>" };
 }
 
@@ -25,10 +25,13 @@ let server: Server;
 let address: string;
 let requests: Array<{ url?: string; authorization?: string }>;
 let healthAnswer: Answer | null;
+/** What /api/bootstrap answers: that Ember is set up, unless a test says otherwise. */
+let bootstrap: object;
 
 beforeEach(async () => {
   requests = [];
   healthAnswer = null;
+  bootstrap = { setup: "complete" };
   server = createServer(({ url = "", headers: { authorization } }, response) => {
     requests.push({ url, authorization });
     const { status, body, headers } = (url === "/api/health" && healthAnswer) || answerOf(url, authorization);
@@ -109,4 +112,18 @@ describe("Health check", () => {
     }
     expect(requests).toEqual([{ url: "/api/health", authorization: `Bearer ${TOKEN}` }]);
   }, 10_000);
+});
+
+describe("Setup", () => {
+  it.each([
+    ["password", "✓ Setup is waiting for the Worker's setup password at <address>/first_run\n"],
+    ["link", "✓ Setup is waiting for the setup link the deploy printed (if it's lost,"],
+    ["open", "✓ Setup is waiting, open to whoever is here\n"],
+    ["closed", "! Setup is waiting, and nobody can do it: the Worker has no setup password or EMBER_SETUP_TOKEN. Give it a setup password with wrangler secret put EMBER_SETUP_PASSWORD"],
+  ])("says what setting Ember up takes while it waits, as its setup access is %s", async (setupAccess, said) => {
+    bootstrap = { setup: "pending", setupAccess };
+    const { status, stdout } = await run(address, null);
+    expect(status).toBe(0);
+    expect(stdout).toContain(said.replace("<address>", address));
+  });
 });

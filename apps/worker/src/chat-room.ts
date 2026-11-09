@@ -22,8 +22,8 @@ import {
   type UserId,
 } from "@ember/protocol";
 import { prepareBody, userIdFromSgid, userIdsIn, type PreparedBody } from "@ember/richtext";
-import { AnswerError, answerOf, NOTES, previewAttachment, questionFor, ROOM_MESSAGES_READ, THREAD_REPLIES_READ, waitFor, type Answer } from "./assistant/answers";
-import { ask } from "./assistant/gateway";
+import { AnswerError, answerOf, NOTES, PICKED_MODEL_NOTES, previewAttachment, questionFor, ROOM_MESSAGES_READ, THREAD_REPLIES_READ, waitFor, type Answer } from "./assistant/answers";
+import { ask, type Answered } from "./assistant/gateway";
 import { JobQueue } from "./at-once";
 import { postWebhook, WebhookError, webhookPayload, type Reply } from "./bots/webhooks";
 import { keptCards } from "./cards";
@@ -151,6 +151,9 @@ const TYPING_AGAIN_MS = 3_000;
 
 /** Why the room posts nothing for a question for @ember: Ember AI was turned off, or @ember taken out of the room. */
 const ASSISTANT_GONE = "Ember AI has been turned off, or @ember is no longer in the room";
+
+/** What @ember says to a question: its model's answer, or the note saying why it has none, and the pages the answer came from, if it used the web. */
+type Said = Pick<Answered, "text" | "sources">;
 
 /** How long an Active Storage key is: `MINIMUM_TOKEN_LENGTH`. */
 const KEY_LENGTH = 28;
@@ -1155,7 +1158,7 @@ export class ChatRoom extends DurableObject<Env> {
         if (!message) throw new AnswerError("the message is gone");
         const access = await workspace(this.env).assistantIn(roomId, question.author.id);
         if (!access) throw new AnswerError(ASSISTANT_GONE);
-        const refused = await this.typingWhile(access.bot, message.parentId, async () => this.postAnswer(roomId, await this.answerTo(roomId, access, question, message), message));
+        const refused = await this.typingWhile(access.bot, message.parentId, async () => this.postAnswer(roomId, await this.saidTo(roomId, access, question, message), message));
         if (refused) throw new AnswerError(`it wasn't posted: ${refused}`);
         console.log(`${job} posted`);
       } catch (error) {
@@ -1166,19 +1169,20 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
-   * What @ember answers `message`, `question`'s message, with what it reads of the conversation, in
-   * Markdown, at the asker's levels, ending with an ellipsis when the model was cut short, or the note it
-   * posts when its model doesn't answer, saying why, which the room logs.
+   * What @ember says to `message`, `question`'s message, with what it reads of the conversation, using
+   * the web as Search the web lets it: its answer in Markdown, at the asker's levels, with the model they
+   * picked, if they did, ending with an ellipsis when the model was cut short, and the pages it came from,
+   * or the note it posts when its model doesn't answer, saying why, which the room logs.
    */
-  private async answerTo(roomId: RoomId, { gateway, community, levels }: AssistantAccess, { author, roomName }: AssistantAsk, message: Message): Promise<string> {
-    if (!gateway) return NOTES["unopened token"];
+  private async saidTo(roomId: RoomId, { gateway, picked, community, levels, webTools, webSearchOn }: AssistantAccess, { author, roomName }: AssistantAsk, message: Message): Promise<Said> {
+    if (!gateway) return { text: NOTES["unopened token"] };
     const conversation = await this.conversationOf(this.storeFor(roomId), message);
     const where = { community, roomName, inThread: message.parentId !== undefined };
-    const asked = questionFor(conversation, author, where, levels, new Date());
+    const asked = questionFor(conversation, author, where, levels, new Date(), webTools, webSearchOn);
     const answered = await ask(this.env, gateway, asked, waitFor(asked));
-    if (!("refusal" in answered)) return answered.cut ? `${answered.text}\n\n…` : answered.text;
-    console.error(`Ember AI's model didn't answer message ${message.id}: ${answered.refusal}`);
-    return NOTES[answered.reason];
+    if (!("refusal" in answered)) return { text: answered.cut ? `${answered.text}\n\n…` : answered.text, ...(answered.sources && { sources: answered.sources }) };
+    console.error(`Ember AI's model ${gateway.model} didn't answer message ${message.id}: ${answered.refusal}`);
+    return { text: (picked && PICKED_MODEL_NOTES[answered.reason]) || NOTES[answered.reason] };
   }
 
   /**
@@ -1192,15 +1196,16 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
-   * Posts `text`, @ember's answer to `message` in Markdown, as its reply: in `message`'s thread when it's
-   * in one, only there, with the pictures it shows in a card under it and a preview of its first web link
-   * below it, as the composer adds one. Like a bot's reply, it reaches the room as any message does, but
-   * goes to no bot, @ember among them. It's posted only while Ember AI is on and @ember in the room, and
-   * `message` still there, so that turning Ember AI off, taking @ember out of the room or deleting the
-   * question while the model answers posts nothing. Answers why the room keeps nothing of it, if it doesn't.
+   * Posts what @ember `said` to `message`, its answer in Markdown, as its reply: in `message`'s thread
+   * when it's in one, only there, with the pictures it shows in a card under it, the pages it came from
+   * after it, and a preview of its first web link below it, as the composer adds one. Like a bot's reply,
+   * it reaches the room as any message does, but goes to no bot, @ember among them. It's posted only while
+   * Ember AI is on and @ember in the room, and `message` still there, so that turning Ember AI off, taking
+   * @ember out of the room or deleting the question while the model answers posts nothing. Answers why the
+   * room keeps nothing of it, if it doesn't.
    */
-  private async postAnswer(roomId: RoomId, text: string, message: Message): Promise<string | null> {
-    const answer = answerOf(text);
+  private async postAnswer(roomId: RoomId, said: Said, message: Message): Promise<string | null> {
+    const answer = answerOf(said.text, said.sources);
     const preview = answer.firstLink === null ? null : await this.previewOf(answer.firstLink);
     const access = await workspace(this.env).assistantIn(roomId, message.creator.id);
     return this.serially(async () => {

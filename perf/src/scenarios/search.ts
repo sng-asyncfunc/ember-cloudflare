@@ -38,8 +38,8 @@ async function search(server: Server, session: Session, q: string): Promise<{ me
   const started = performance.now();
   const response = await fetch(new URL(`/api/searches?q=${encodeURIComponent(q)}`, server.url), { headers: { Cookie: session.cookie } });
   if (!response.ok) throw new Error(`Searching for "${q}" failed (${response.status}): ${await response.text()}`);
-  const { messages } = (await response.json()) as SearchResults;
-  return { messages, ms: performance.now() - started };
+  const { matches } = (await response.json()) as SearchResults;
+  return { messages: matches.map(({ message }) => message), ms: performance.now() - started };
 }
 
 /** Searches every `POLL_MS` until `found` holds, and answers when it did. */

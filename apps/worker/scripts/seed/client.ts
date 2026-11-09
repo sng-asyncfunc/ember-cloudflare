@@ -86,14 +86,14 @@ async function sessionOf(response: Response): Promise<Session> {
   return { user, cookie };
 }
 
-/** An Ember, at `origin`, which a deployment's setup token, if it's given, lets the seed set up. */
+/** An Ember, at `origin`, which a deployment's setup password or token, if it's given, lets the seed set up. */
 export class Ember {
   readonly origin: string;
-  readonly #setupToken: string | undefined;
+  readonly #setupSecret: string | undefined;
 
-  constructor(origin: string, setupToken?: string) {
+  constructor(origin: string, setupSecret?: string) {
     this.origin = origin;
-    this.#setupToken = setupToken;
+    this.#setupSecret = setupSecret;
   }
 
   /** Asks the Worker, as the app's own pages do, which a server over HTTPS asks of every change. */
@@ -120,7 +120,8 @@ export class Ember {
   /** Sets Ember up with `person` as its first administrator, as the Set up Ember form does. */
   async setUp(person: PersonForm, avatar?: SeedFile): Promise<Session> {
     const { headers, ...form } = userForm(person, avatar);
-    const authorization = this.#setupToken ? { Authorization: `Bearer ${this.#setupToken}` } : {};
+    // Percent-encoded, as the page sends it, since a header can't hold every character a password can.
+    const authorization = this.#setupSecret ? { Authorization: `Bearer ${encodeURIComponent(this.#setupSecret)}` } : {};
     return sessionOf(await this.request("/api/first_run", { method: "POST", ...form, headers: { ...headers, ...authorization }, expected: [201] }));
   }
 

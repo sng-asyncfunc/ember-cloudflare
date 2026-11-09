@@ -239,6 +239,11 @@ test("a bot's settings fit the phone", async ({ page, screenIsFine }) => {
   await expect(page.getByRole("textbox", { name: "Bot name" })).toHaveValue(BOT.name);
   await expect(page.getByRole("button", { name: "Generate a new key" })).toBeVisible();
   await screenIsFine();
+  // Incoming, whose menu names a room as long as names go, then Outgoing, each scrolled to.
+  for (const name of ["Incoming", "Outgoing"]) {
+    await page.getByRole("region", { name }).scrollIntoViewIfNeeded();
+    await screenIsFine();
+  }
 });
 
 test("your profile, opened from the rail, fits the phone with Log out in the top bar and a translation button by each field", async ({ page, room, session, screenIsFine }) => {

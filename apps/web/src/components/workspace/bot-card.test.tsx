@@ -3,7 +3,9 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { dateTimeLabel } from "@/lib/messages";
+import { marksFor } from "@/lib/search";
 import { BotCards } from "./bot-card";
+import { SearchMarks } from "./search-marks";
 
 const card = (parts: CardPart[], rest: Partial<Card> = {}): Card => ({ source: "attachment", parts, ...rest });
 
@@ -278,5 +280,38 @@ describe("Bot cards", () => {
     expect(buttons[0]).toHaveAccessibleName("Show less");
     expect(buttons[0]).toHaveAttribute("aria-expanded", "true");
     expect(buttons[0]!.previousElementSibling).not.toHaveClass("max-h-[5lh]");
+  });
+
+  it("marks what a search matched in each part of a card that has text, as each was searched", () => {
+    const deploys = "https://example.com/deploys/42";
+    render(
+      <SearchMarks value={marksFor(["deploy"])}>
+        <BotCards
+          cards={[
+            card(
+              [
+                { kind: "author", name: "Deploy bot", href: "https://example.com/bot" },
+                { kind: "title", text: "Deploy finished", href: deploys },
+                { kind: "header", text: "Deploy 42" },
+                { kind: "text", html: "<p>The deploy went out</p>" },
+                { kind: "fields", fields: [{ title: "Deploy", html: "<p>deploy 42</p>", short: true }] },
+                { kind: "image", image: { url: "https://example.com/graph.png", alt: "" }, title: "Deploy graph" },
+                { kind: "context", items: [{ html: "<p>By the deploy bot</p>" }] },
+                { kind: "buttons", buttons: [{ text: "Open deploy", href: deploys }] },
+                { kind: "table", rows: [["deploy", "42"]], columns: [{ align: "left", wrap: false }, { align: "right", wrap: false }] },
+                { kind: "tiles", tiles: [{ title: "Deploy", subtitle: "deploy 42", body: "<p>deploy body</p>", subtext: "<p>deploy subtext</p>" }] },
+                { kind: "footer", text: "Deploy log" },
+              ],
+              { pretext: "<p>A deploy</p>" },
+            ),
+          ]}
+        />
+      </SearchMarks>,
+    );
+    const marks = [...document.querySelectorAll("mark[data-search-match]")].map((mark) => mark.textContent);
+    // The pretext, author, title, header, text, field's title and value, image's title, context, button,
+    // table cell, tile's title, subtitle, body and subtext, and footer.
+    expect(marks).toEqual(["deploy", "Deploy", "Deploy", "Deploy", "deploy", "Deploy", "deploy", "Deploy", "deploy", "deploy", "deploy", "Deploy", "deploy", "deploy", "deploy", "Deploy"]);
+    expect(screen.getByRole("link", { name: "Open deploy" }).querySelector("mark")).toHaveTextContent("deploy");
   });
 });

@@ -19,6 +19,9 @@ const sidebarRooms = (tab: Page) => tab.getByRole("complementary", { name: "Conv
 /** Each tab waits up to 5 seconds at random before loading its sidebar again for a new order. */
 const REORDERED = { timeout: 15_000 };
 
+/** How long after a drop the list ignores clicks on its rows, so that the drop never opens a room. */
+const CLICK_GUARD_MS = 500;
+
 test.describe("Shared room order", () => {
   test("the administrator puts rooms in order for everyone, which members' sidebars follow without being loaded again", async ({ page, browser, baseURL }) => {
     await useOwnAddress(page);
@@ -66,6 +69,7 @@ test.describe("Shared room order", () => {
       for (let i = 1; i < below; i++) await page.keyboard.press("Alt+ArrowUp");
       await expectAt(1, first);
       await page.getByRole("button", { name: `Move ${first}` }).dragTo(rows.first(), { targetPosition: { x: 40, y: 4 } });
+      const dropped = await page.evaluate(() => Date.now());
       await expectAt(0, first);
       await saveOrder.click();
       await expect(page.getByText("Room order saved for everyone.")).toBeVisible();
@@ -85,6 +89,8 @@ test.describe("Shared room order", () => {
       await page.keyboard.press("Alt+ArrowDown");
       await expectAt(0, second);
       const unsaved = page.getByRole("dialog", { name: "Unsaved Changes" });
+      // The steps since the drop can take less than its guard, when the member's sidebar follows quickly.
+      await expect.poll(() => page.evaluate(() => Date.now())).toBeGreaterThanOrEqual(dropped + CLICK_GUARD_MS);
       await row(first).getByRole("link").click();
       await expect(unsaved).toHaveAccessibleDescription("You’ve changed the room order. Save it before you leave, or discard it to keep things as they were.");
       await unsaved.getByRole("button", { name: "Keep editing" }).click();

@@ -1,4 +1,4 @@
-import { avatarSvg, type DirectoryUser, type User } from "@ember/protocol";
+import { ASSISTANT_ID, avatarSvg, type DirectoryUser, type User } from "@ember/protocol";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -78,6 +78,47 @@ describe("Initials avatars", () => {
     show([someone(1)]);
     expect(drawing).toHaveBeenCalledTimes(DRAWINGS_KEPT + 2);
     drawing.mockRestore();
+  });
+});
+
+describe("Bots' avatars are circles", () => {
+  const bot: DirectoryUser = { id: "b1", name: "Build Bot", bio: null, role: "bot", status: "active", avatarUrl: "/users/b1.abc/avatar?v=20261014120000" };
+  const listing: People = new Map([
+    [ada.id, ada],
+    [bot.id, bot],
+  ]);
+
+  it("draws a bot as a circle where people are squares with rounded corners, as messages show them", () => {
+    expect(picture(<UserAvatar user={ada} square />, listing).image).toHaveClass("rounded-[6px]");
+    const { image } = picture(<UserAvatar user={{ id: bot.id, name: bot.name }} square />, listing);
+    expect(image).toHaveClass("rounded-full");
+    expect(image).not.toHaveClass("rounded-[6px]");
+  });
+
+  it("keeps a bot's circle whatever corners the place gives people's, as a thread's summary gives its faces 4px", () => {
+    expect(picture(<UserAvatar user={ada} square className="size-6 rounded-[4px]" />, listing).image).toHaveClass("rounded-[4px]");
+    const { image } = picture(<UserAvatar user={bot} square className="size-6 rounded-[4px]" />, listing);
+    expect(image).toHaveClass("size-6", "rounded-full");
+    expect(image).not.toHaveClass("rounded-[4px]");
+  });
+
+  it("draws @ember as a circle before the directory lists anyone", () => {
+    expect(picture(<UserAvatar user={{ id: ASSISTANT_ID, name: "Ember" }} square />, new Map()).image).toHaveClass("rounded-full");
+  });
+
+  it("rounds the link to a bot's page as well, so the circle darkens under a mouse", () => {
+    picture(
+      <>
+        <AvatarLink user={ada} square />
+        <AvatarLink user={bot} square />
+      </>,
+      listing,
+    );
+    expect(screen.getByRole("link", { name: "Ada Lovelace" })).toHaveClass("rounded-[6px]");
+    const link = screen.getByRole("link", { name: "Build Bot" });
+    expect(link).toHaveClass("rounded-full");
+    expect(link).not.toHaveClass("rounded-[6px]");
+    expect(link.querySelector("img")).toHaveClass("rounded-full");
   });
 });
 

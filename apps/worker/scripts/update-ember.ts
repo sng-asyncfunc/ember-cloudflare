@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { dataOf, type JsoncString, stringsOf } from "./jsonc.ts";
 
 /** Ember's repository, where its releases are. */
 const EMBER = "https://github.com/NYLLON-SOFTWARE/ember-cloudflare";
@@ -41,11 +42,23 @@ const NOTED_CONFLICT = /^Ember-Conflict: (.+)$/gm;
 /** A workflow's token can't change workflows, so a published update leaves the copy's as they are. */
 const WORKFLOWS = ".github/workflows";
 const UPDATE_WORKFLOW = `${WORKFLOWS}/update-ember.yml`;
-/** The Worker's settings, where Deploy to Cloudflare names the deployer's Worker and bucket. */
+/** The Worker's settings, where Deploy to Cloudflare writes what the deployer chose in its form. */
 const WRANGLER = "wrangler.jsonc";
-/** Where in wrangler.jsonc a bucket's name and binding are, by the bucket's place in the list. */
-const BUCKET_NAME = /^r2_buckets\.(\d+)\.bucket_name$/;
-const BUCKET_BINDING = /^r2_buckets\.(\d+)\.binding$/;
+/** The settings Deploy to Cloudflare's form writes outside any binding: the Worker's name, and where its messages live. */
+const DEPLOYERS_SETTINGS = ["name", "vars.STORAGE_BACKEND"];
+/**
+ * The members of a binding in each list whose values Deploy to Cloudflare's form writes, each with the one
+ * the button adds it after when the file lacks it: a bucket's preview bucket after the bucket's name, and
+ * the id of the database it makes after the database's name.
+ */
+const DEPLOYERS_MEMBERS: Record<string, Record<string, string | null>> = {
+  r2_buckets: { bucket_name: null, preview_bucket_name: "bucket_name" },
+  d1_databases: { database_name: null, database_id: "database_name", preview_database_id: "database_id" },
+};
+/** Where a binding's member is in wrangler.jsonc, by the binding's place in its list, such as `r2_buckets.0.bucket_name`. */
+const BINDING_MEMBER = /^(\w+)\.(\d+)\.(\w+)$/;
+/** A binding's member as `namesIn` names it, by the binding in place of its place: `r2_buckets.FILES.bucket_name`. */
+const NAMED_MEMBER = /^(\w+)\.(\w+)\.(\w+)$/;
 /** Where Ember says which release it is: a release's version is the one there. */
 const VERSION_FILE = "apps/worker/package.json";
 /** What GitHub answers a workflow that may not open pull requests, as a new repository's may not. */
@@ -240,118 +253,87 @@ function fileAt(revision: string, file: string): string | undefined {
   return result.status === 0 ? result.stdout : undefined;
 }
 
-interface Token {
-  text: string;
-  start: number;
-  kind: "string" | "punctuation" | "scalar" | "comment" | "space";
-}
-
-/** JSONC's tokens: JSON's, and the comments between them. */
-function tokensOf(text: string): Token[] {
-  const tokens: Token[] = [];
-  for (let at = 0; at < text.length; ) {
-    const start = at;
-    let kind: Token["kind"];
-    if (text[at] === '"') {
-      for (at++; at < text.length && text[at] !== '"'; at += text[at] === "\\" ? 2 : 1);
-      at++;
-      kind = "string";
-    } else if (text.startsWith("//", at) || text.startsWith("/*", at)) {
-      const end = text.startsWith("//", at) ? text.indexOf("\n", at) : text.indexOf("*/", at + 2) + 2;
-      at = end > start ? end : text.length;
-      kind = "comment";
-    } else if ("{}[]:,".includes(text[at]!)) {
-      at++;
-      kind = "punctuation";
-    } else {
-      kind = /\s/.test(text[at]!) ? "space" : "scalar";
-      const sameKind = kind === "space" ? /\s/ : /[^\s{}[\]:,"/]/;
-      do at++;
-      while (at < text.length && sameKind.test(text[at]!));
-    }
-    tokens.push({ text: text.slice(start, at), start, kind });
-  }
-  return tokens.filter((token) => token.kind !== "comment" && token.kind !== "space");
-}
-
-/** A JSONC file's data, without its comments or the commas it may have before a closing bracket. */
-function dataOf(text: string): unknown {
-  const tokens = tokensOf(text);
-  const json = tokens.filter((token, at) => !(token.text === "," && "}]".includes(tokens[at + 1]?.text || "}")));
-  return JSON.parse(json.map((token) => token.text).join(""));
-}
-
-/** Each string value in a JSONC file, with its path, such as `name` or `r2_buckets.0.bucket_name`. */
-function stringsOf(text: string): { path: string; start: number; end: number; value: string }[] {
-  const strings = [];
-  const open: { kind: string; segment: string; key?: string; index: number; expectingKey: boolean }[] = [];
-  const segmentHere = () => {
-    const container = open.at(-1);
-    return container?.kind === "[" ? String(container.index) : (container?.key ?? "");
-  };
-  for (const token of tokensOf(text)) {
-    const container = open.at(-1);
-    if (token.text === "{" || token.text === "[") {
-      open.push({ kind: token.text, segment: segmentHere(), index: 0, expectingKey: token.text === "{" });
-    } else if (token.text === "}" || token.text === "]") {
-      open.pop();
-    } else if (container && token.text === ":") {
-      container.expectingKey = false;
-    } else if (container && token.text === ",") {
-      container.index++;
-      container.expectingKey = container.kind === "{";
-    } else if (token.kind === "string" && container?.expectingKey) {
-      container.key = JSON.parse(token.text) as string;
-    } else if (token.kind === "string") {
-      const path = [...open.slice(1).map((outer) => outer.segment), segmentHere()].join(".");
-      strings.push({ path, start: token.start, end: token.start + token.text.length, value: JSON.parse(token.text) as string });
-    }
-  }
-  return strings;
-}
-
 /**
- * The names Deploy to Cloudflare writes into wrangler.jsonc, and where they are, by what they name:
- * the Worker, and each bucket by its binding, which stays the bucket's wherever it moves in the list.
+ * The names Deploy to Cloudflare writes into wrangler.jsonc, and where they are, by their path, with each
+ * binding's place in its list given as the binding, which stays its resource's wherever it moves in the
+ * list: `name`, `vars.STORAGE_BACKEND`, `r2_buckets.FILES.bucket_name`, `d1_databases.DB.database_id`.
  */
-function namesIn(text: string): Map<string, { start: number; end: number; value: string }> {
+function namesIn(text: string): Map<string, JsoncString> {
   const strings = stringsOf(text);
   const bindings = new Map<string, string>();
   for (const { path, value } of strings) {
-    const place = BUCKET_BINDING.exec(path)?.[1];
-    if (place !== undefined) bindings.set(place, value);
+    const [, list, place, member] = BINDING_MEMBER.exec(path) ?? [];
+    if (member === "binding") bindings.set(`${list}.${place}`, value);
   }
-  const names = new Map<string, { start: number; end: number; value: string }>();
+  const names = new Map<string, JsoncString>();
   for (const string of strings) {
-    const place = BUCKET_NAME.exec(string.path)?.[1];
-    const binding = place === undefined ? undefined : bindings.get(place);
-    if (string.path === "name") names.set("the Worker", string);
-    else if (binding !== undefined) names.set(`the bucket bound to ${binding}`, string);
+    const [, list, place, member] = BINDING_MEMBER.exec(string.path) ?? [];
+    const binding = bindings.get(`${list}.${place}`);
+    if (DEPLOYERS_SETTINGS.includes(string.path)) names.set(string.path, string);
+    else if (binding !== undefined && DEPLOYERS_MEMBERS[list!]?.[member!] !== undefined) names.set(`${list}.${binding}.${member}`, string);
   }
   return names;
 }
 
 const deployersNames = (text: string) => new Map([...namesIn(text)].map(([what, { value }]): [string, string] => [what, value]));
 
-/** `text` with the names of what `names` names set to theirs. */
-function withNames(text: string, names: Map<string, string>): string {
-  const named = [...namesIn(text)].filter(([what]) => names.has(what)).sort(([, a], [, b]) => a.start - b.start);
-  return named.reduceRight((result, [what, { start, end }]) => result.slice(0, start) + JSON.stringify(names.get(what)) + result.slice(end), text);
+/**
+ * Where in a file whose names are `here` the button would add the member that `what` names, which the file
+ * lacks: after the nearest member before it that the file has, as a preview bucket goes after its bucket's
+ * name. Anything else, and a member whose binding the file lacks, goes nowhere.
+ */
+function besideWhat(what: string, here: Map<string, JsoncString>): JsoncString | undefined {
+  const [, list, binding, member] = NAMED_MEMBER.exec(what) ?? [];
+  for (let before = DEPLOYERS_MEMBERS[list!]?.[member!]; before; before = DEPLOYERS_MEMBERS[list!]![before]) {
+    const beside = here.get(`${list}.${binding}.${before}`);
+    if (beside) return beside;
+  }
+  return undefined;
 }
 
 /**
- * Ember's wrangler.jsonc at `release` with the copy's names for its Worker and bucket, when those are
- * all the copy changed there, however Deploy to Cloudflare laid the file out: the names sit beside
- * lines Ember changes, such as their comments, where a merge would leave conflict markers. A name
- * whose binding the release lacks, as when Ember renames one, is the merge's to place.
+ * `text` with the names of what `names` names set to theirs, and each member it lacks added after the one
+ * Deploy to Cloudflare adds it after, as the button writes it.
+ */
+function withNames(text: string, names: Map<string, string>): string {
+  const here = namesIn(text);
+  const edits = [...names].flatMap(([what, name]) => {
+    const named = here.get(what);
+    if (named) return [{ start: named.start, end: named.end, text: JSON.stringify(name) }];
+    const beside = besideWhat(what, here);
+    return beside ? [{ start: beside.end, end: beside.end, text: `,${JSON.stringify(NAMED_MEMBER.exec(what)![3])}: ${JSON.stringify(name)}` }] : [];
+  });
+  // From the end back, so each edit's place is still where it was; members added after the same one go
+  // in last first, which leaves them in the order `names` has them.
+  return edits
+    .map((edit, order) => ({ ...edit, order }))
+    .sort((a, b) => b.start - a.start || b.order - a.order)
+    .reduce((result, edit) => result.slice(0, edit.start) + edit.text + result.slice(edit.end), text);
+}
+
+/** `text` without the members that name what `whats` name, nor the comma after each. */
+function withoutNames(text: string, whats: string[]): string {
+  const here = namesIn(text);
+  const members = whats.flatMap((what) => here.get(what) ?? []).sort((a, b) => b.member - a.member);
+  return members.reduce((result, { member, end }) => result.slice(0, member) + result.slice(end).replace(/^\s*,/, ""), text);
+}
+
+/**
+ * Ember's wrangler.jsonc at `release` with what the copy's deployer chose in Deploy to Cloudflare's form,
+ * its Worker's, bucket's and database's names and where its messages live, when those are all the copy
+ * changed there, however the button laid the file out: they sit beside lines Ember changes, such as their
+ * comments, where a merge would leave conflict markers. What the button adds, a bucket's preview bucket and
+ * the id of the database it made, counts among them. A name whose binding the release lacks, as when
+ * Ember renames one, is the merge's to place.
  */
 function wranglerWithCopysNames(base: string, release: Release): string | undefined {
   const [ours, was, now] = ["HEAD", base, release.commit].map((revision) => fileAt(revision, WRANGLER));
   if (ours === undefined || was === undefined || now === undefined) return undefined;
   try {
     const names = deployersNames(ours);
-    const onlyNamed = isDeepStrictEqual(dataOf(withNames(ours, deployersNames(was))), dataOf(was));
-    const placed = [...names.keys()].every((what) => namesIn(now).has(what));
+    const added = [...names.keys()].filter((what) => !namesIn(was).has(what));
+    const onlyNamed = isDeepStrictEqual(dataOf(withoutNames(withNames(ours, deployersNames(was)), added)), dataOf(was));
+    const placed = [...names.keys()].every((what) => namesIn(now).has(what) || besideWhat(what, namesIn(now)) !== undefined);
     return onlyNamed && placed ? withNames(now, names) : undefined;
   } catch {
     // Not JSONC that this reads, so it's the merge's to make.

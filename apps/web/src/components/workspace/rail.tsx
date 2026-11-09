@@ -1,4 +1,4 @@
-import type { MouseEvent } from "react";
+import { useContext, type MouseEvent } from "react";
 import type { Me, NavigationSlot } from "@ember/protocol";
 import { PageLink } from "@/components/page-link";
 import { useAccount } from "@/hooks/use-account";
@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { AppearanceMenu } from "./appearance-menu";
 import { NavigationIcon } from "./navigation-icon";
 import { opensNewDirect } from "./new-direct-dialog";
+import { OpenSearchContext, opensSearch } from "./search-box";
 import { UserAvatar } from "./user-avatar";
 
 const RAIL_LINK = cn(
@@ -97,6 +98,7 @@ interface Props {
  */
 export function Rail({ me, workspaceName, current, activity, newRelease, onNewDirect }: Props) {
   const { logo } = useAccount();
+  const openSearch = useContext(OpenSearchContext);
   const marked = activity.on ? null : current;
   return (
     // Scrolls when a short screen (a phone in landscape) can't fit it all; widens by the notch's inset.
@@ -122,7 +124,8 @@ export function Rail({ me, workspaceName, current, activity, newRelease, onNewDi
       {/* Never marked, since its address opens New direct message over the last room visited. */}
       <RailLink slot="dms" label="DMs" href={NEW_DIRECT_PATH} current={false} onClick={opensNewDirect(onNewDirect)} />
       <ActivityButton {...activity} />
-      <RailLink slot="search" label="Search" href={SEARCHES_PATH} current={marked === "search"} />
+      {/* Opens the search box in place, for everything. */}
+      <RailLink slot="search" label="Search" href={SEARCHES_PATH} current={marked === "search"} onClick={opensSearch(openSearch)} />
       <hr className="my-1 w-8 border-t" />
       <RailLink
         slot="admin"

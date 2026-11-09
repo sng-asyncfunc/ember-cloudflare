@@ -293,7 +293,11 @@ function runAudits({ insets, denseTargets }: { insets: SafeArea; denseTargets: s
     const axis = scrollerOf(element, "y") ? "y" : "x";
     const list = scrollerOf(element, axis);
     const floatsOver = (hit: Element) => list !== null && list !== document.scrollingElement && !list.contains(hit);
-    const points = fingertip(middle(shown), size);
+    // A control cut by no more than TOLERANCE counts as all shown, and the fingertip shrinks by the cut, as
+    // a whole one on the middle of what shows would reach within a pixel of its edge, where Chromium's
+    // elementFromPoint finds whatever is past it.
+    const cut = Math.max(rect.width - (shown.right - shown.left), rect.height - (shown.bottom - shown.top));
+    const points = fingertip(middle(shown), partlyShown ? size : size - cut);
     const [misses, floating] = [new Set<string>(), new Set<string>()];
     for (const [pointX, pointY] of points) {
       const hit = document.elementFromPoint(pointX, pointY);

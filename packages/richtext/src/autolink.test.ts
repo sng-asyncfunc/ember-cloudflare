@@ -1,9 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { autoLink, TagIndex } from "./autolink";
+import { autoLink, hasLinkable, TagIndex } from "./autolink";
 import { parseHtml } from "./parse";
 
 const link = (html: string) => autoLink(parseHtml, html);
 const anchor = (href: string, text = href) => `<a target="_blank" href="${href}">${text}</a>`;
+
+describe("Addresses a message shows as links", () => {
+  const linkable = ["See https://example.com/a.", "www.example.com", "SSH://host", "xmpp://ada@example.com", "Write to ada@example.com.", "o'brien+ember@example.co.uk"];
+  const unlinkable = ["no link", "http: and www.", "https:// alone", "javascript://alert(1)", "gopher+evil://x", "@ the cliffs, ada@ them", "ada@example"];
+
+  it("finds the addresses autoLink links in plain text, and only those", () => {
+    for (const text of linkable) expect(hasLinkable(text), text).toBe(true);
+    for (const text of unlinkable) expect(hasLinkable(text), text).toBe(false);
+    for (const text of [...linkable, ...unlinkable]) expect(link(`<p>${text}</p>`).includes("<a "), text).toBe(hasLinkable(text));
+  });
+});
 
 describe("Links in message text", () => {
   it("links addresses with a known scheme, and www. addresses with http://", () => {

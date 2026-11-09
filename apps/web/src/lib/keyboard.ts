@@ -1,6 +1,19 @@
 /** Phones and tablets: their on-screen keyboards have no Shift+Enter. */
 export const hasTouchKeyboard = () => matchMedia("(pointer: coarse)").matches;
 
+/** Whether the keyboard is an Apple device's, whose shortcuts take Cmd where others take Ctrl. */
+const appleKeyboard = () => /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+
+/**
+ * Cmd+F on a Mac, iPad or iPhone, or Ctrl+F elsewhere, which opens the search box, as it opens Slack's,
+ * and the browser's own find from inside it. A Mac's Ctrl+F moves the caret on in a field, so it stays
+ * the field's.
+ */
+export function opensFind(event: KeyboardEvent): boolean {
+  if (event.key.toLowerCase() !== "f" || event.altKey || event.shiftKey || event.isComposing) return false;
+  return appleKeyboard() ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+}
+
 /** Ctrl+K, or Cmd+K on a Mac, which opens the Link field of Lexxy's toolbar (its `data-hotkey="cmd+k ctrl+k"`). */
 export function opensLink(event: KeyboardEvent): boolean {
   return event.key.toLowerCase() === "k" && event.ctrlKey !== event.metaKey && !event.altKey && !event.shiftKey;

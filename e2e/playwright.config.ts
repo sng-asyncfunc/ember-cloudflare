@@ -5,6 +5,7 @@ import { FIRST_RUN, firstRunProjects, SETUP_TOKEN } from "./projects/first-run";
 import { mobileProjects } from "./projects/mobile";
 import { screenshotProjects } from "./projects/screenshots";
 import {
+  AI_GATEWAY_ACCOUNT,
   AI_GATEWAY_PORT,
   MEMBERFUL_KEYS,
   MEMBERFUL_SITE_PORT,
@@ -64,8 +65,9 @@ export default defineConfig<MobileOptions>({
     // which Ember sends email with once they give it the API key it takes, as an administrator does in
     // Set up email, the address of the siteverify the Turnstile spec fakes, which Ember asks about
     // checks once it's given a widget's keys in Set up Turnstile, and the address of the AI Gateway the
-    // Ember AI spec fakes, which Ember asks models through once it's given an account in Set up Ember AI.
-    // Servers start in turn, so the app is built by then.
+    // Ember AI spec fakes, which Ember asks models through once it's given an account in Set up Ember AI,
+    // and the ID of the account Ember is deployed to, as `pnpm run deploy` gives it, which Set up Ember
+    // AI fills in. Servers start in turn, so the app is built by then.
     {
       command: [
         `node -e "require('node:fs').rmSync('e2e/.wrangler/settings-state', { recursive: true, force: true })"`,
@@ -75,7 +77,7 @@ export default defineConfig<MobileOptions>({
           `--var MEMBERFUL_CLIENT_ID:${MEMBERFUL_KEYS.clientId} --var MEMBERFUL_CLIENT_SECRET:${MEMBERFUL_KEYS.clientSecret}`,
           `--var MEMBERFUL_API_KEY:${MEMBERFUL_KEYS.apiKey} --var MEMBERFUL_WEBHOOK_SECRET:${MEMBERFUL_KEYS.webhookSecret}`,
           `--var RESEND_API_URL:http://127.0.0.1:${RESEND_API_PORT} --var TURNSTILE_SITEVERIFY_URL:http://127.0.0.1:${SITEVERIFY_PORT}`,
-          `--var AI_GATEWAY_URL:http://127.0.0.1:${AI_GATEWAY_PORT}`,
+          `--var AI_GATEWAY_URL:http://127.0.0.1:${AI_GATEWAY_PORT} --var CLOUDFLARE_ACCOUNT_ID:${AI_GATEWAY_ACCOUNT.accountId}`,
           "--persist-to ../../e2e/.wrangler/settings-state",
         ].join(" "),
       ].join(" && "),

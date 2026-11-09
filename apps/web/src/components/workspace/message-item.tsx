@@ -8,6 +8,7 @@ import { messagePath, permalinkOf, threadPath } from "@/hooks/use-route";
 import { cardsQuote, dateTimeLabel, lastReplyLabel, timeLabel } from "@/lib/messages";
 import { isPending, type PendingMessage } from "@/lib/room-state";
 import { cn } from "@/lib/utils";
+import { AgentBadge, isAssistant } from "./agent-badge";
 import { Attachment } from "./attachment";
 import { BotCards } from "./bot-card";
 import { MessageActionsMenu, type MessageActionsHandle } from "./message-actions-menu";
@@ -60,8 +61,6 @@ interface Props {
   /** What can be done to the message, or null where nothing can, as in a room that's gone. */
   actions: MessageActions | null;
   editors: MessageEditors;
-  /** The name of the message's room, which search results show it with. */
-  roomName?: string;
   /**
    * Where a message in a thread's panel is, the thread's message or a reply: there it has no summary of
    * the thread, nor Reply in thread, and a reply also sent to the room says so.
@@ -164,13 +163,14 @@ function ReplyContext({ message, thread }: { message: Message; thread?: ThreadPl
 /**
  * A message deleted while its thread has replies, which keeps its place for them: no author, time, text,
  * actions or reactions, and its thread's summary under it, outside its thread. A blank square stands in
- * for its avatar, so it doesn't read as the message before it going on.
+ * for its avatar, with the space above a run's first message, so it doesn't read as the message before
+ * it going on.
  */
 function DeletedMessage({ message, thread, open }: { message: Message; thread?: ThreadPlace; open?: boolean }) {
   return (
     <article
       className={cn(
-        "group/message relative grid grid-cols-[36px_minmax(0,1fr)] gap-x-2 px-5 max-md:grid-cols-[30px_minmax(0,1fr)] max-md:gap-x-2.5 max-md:px-3",
+        "group/message relative grid grid-cols-[36px_minmax(0,1fr)] gap-x-2 px-5 pt-1 max-md:grid-cols-[30px_minmax(0,1fr)] max-md:gap-x-2.5 max-md:px-3",
         open && "bg-hover",
       )}
     >
@@ -188,19 +188,22 @@ function DeletedMessage({ message, thread, open }: { message: Message; thread?: 
 
 /**
  * The author's name as the people directory lists them now, which runs to an ellipsis rather than wrap,
- * and shows their bio on hover.
+ * and shows their bio on hover, then the agent badge for @ember.
  */
 function Author({ user }: { user: User }) {
   const listed = useContext(PeopleContext).get(user.id) ?? user;
   return (
-    <strong title={userTitle(listed)} className="truncate font-bold text-message-ink">
-      {listed.name}
-    </strong>
+    <>
+      <strong title={userTitle(listed)} className="truncate font-bold text-message-ink">
+        {listed.name}
+      </strong>
+      {isAssistant(user) && <AgentBadge />}
+    </>
   );
 }
 
 /** One message: a 36px avatar gutter, author and time, then the body. */
-export const MessageItem = memo(function MessageItem({ message, me, threaded: follows, editing: editorOpen, actions, editors, roomName, thread, open }: Props) {
+export const MessageItem = memo(function MessageItem({ message, me, threaded: follows, editing: editorOpen, actions, editors, thread, open }: Props) {
   const article = useRef<HTMLElement>(null);
   const menu = useRef<MessageActionsHandle>(null);
   const attachEditor = useCallback((editor: MessageEditorHandle | null) => editors.attach(message.id, editor), [editors, message.id]);
@@ -261,6 +264,9 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
       aria-busy={(pending && !upload?.error) || undefined}
       className={cn(
         "group/message relative grid grid-cols-[36px_minmax(0,1fr)] gap-x-2 px-5 hover:bg-message-hover max-md:grid-cols-[30px_minmax(0,1fr)] max-md:gap-x-2.5 max-md:px-3",
+        // A message that starts a run has 4px more above it, so a new author starts 12px below the
+        // message before, while one person's messages stay 8px apart.
+        !threaded && "pt-1",
         // Where Message options is 44px, each message is at least as tall as it, so the buttons of short
         // messages in a row don't overlap.
         "touch:min-h-11",
@@ -305,15 +311,6 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
             <h3 className="flex min-h-[22px] items-baseline gap-2 text-[15px] leading-[22px] max-md:flex-wrap max-md:gap-x-2 max-md:gap-y-0.5 max-md:pr-[22px]">
               <Author user={message.creator} />
               {permalink}
-              {/* The room in search results: a dot,
-                  and the room's name, linking to the message as its time does, cut short rather than wrapped. */}
-              {roomName !== undefined && (
-                <span className="min-w-0 truncate text-[0.8rem] font-normal text-message-ink">
-                  · <PageLink href={permalinkOf(message)} className="text-link underline hover:not-active:brightness-130">
-                    {roomName}
-                  </PageLink>
-                </span>
-              )}
               {edited}
             </h3>
           )}
@@ -373,6 +370,7 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
           message={message}
           nodes={quoted}
           row={article}
+          threaded={threaded}
           editable={mine || me.administrator}
           // A reply shown in the room opens its own thread, which its parent's is.
           threadPath={thread ? undefined : threadPath(message.roomId, message.parentId ?? message.id)}

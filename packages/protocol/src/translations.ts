@@ -94,14 +94,15 @@ export const TRANSLATIONS = {
     ["🇧🇷", "URL do Webhook"],
     ["🇯🇵", "Webhook URL"],
   ],
+  // The page's name and the first sentence it says, which is Ember's: Campfire's said only that bots post.
   chat_bots: [
-    ["🇺🇸", "Chat bots. With Chat bots, other sites and services can post updates directly to Ember."],
-    ["🇪🇸", "Bots de chat. Con los bots de chat, otros sitios y servicios pueden publicar actualizaciones directamente en Ember."],
-    ["🇫🇷", "Bots de discussion. Avec les bots de discussion, d'autres sites et services peuvent publier des mises à jour directement sur Ember."],
-    ["🇮🇳", "चैट बॉट। चैट बॉट के साथ, अन्य साइटों और सेवाएं सीधे कैम्पफायर में अपडेट पोस्ट कर सकती हैं।"],
-    ["🇩🇪", "Chat-Bots. Mit Chat-Bots können andere Websites und Dienste Updates direkt in Ember veröffentlichen."],
-    ["🇧🇷", "Chat bots. Com Chat bots, outros sites e serviços podem postar atualizações diretamente no Ember."],
-    ["🇯🇵", "チャットボット。チャットボットを使用すると、他のサイトやサービスがEmberに直接更新情報を投稿できます。"],
+    ["🇺🇸", "Chat bots. Chat bots let other apps and services post in your rooms, and reply when people talk to them."],
+    ["🇪🇸", "Bots de chat. Los bots de chat permiten que otras aplicaciones y servicios publiquen en tus salas y respondan cuando alguien les habla."],
+    ["🇫🇷", "Bots de discussion. Les bots de discussion permettent à d'autres applications et services de publier dans vos salles, et de répondre quand on leur parle."],
+    ["🇮🇳", "चैट बॉट। चैट बॉट के साथ, अन्य ऐप्स और सेवाएं आपके कमरों में पोस्ट कर सकती हैं, और जब लोग उनसे बात करते हैं, तो जवाब दे सकती हैं।"],
+    ["🇩🇪", "Chat-Bots. Mit Chat-Bots können andere Apps und Dienste in Ihren Räumen Beiträge veröffentlichen und antworten, wenn man sie anspricht."],
+    ["🇧🇷", "Chat bots. Com Chat bots, outros apps e serviços podem postar nas suas salas e responder quando alguém fala com eles."],
+    ["🇯🇵", "チャットボット。チャットボットを使用すると、他のアプリやサービスがルームに投稿したり、話しかけられたときに返信したりできます。"],
   ],
   bot_name: [
     ["🇺🇸", "Name the bot"],

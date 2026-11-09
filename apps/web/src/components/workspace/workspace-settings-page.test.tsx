@@ -13,6 +13,7 @@ import {
   type Account,
   type AccountChanges,
   type AssistantSetup,
+  type CopyOnGitHub,
   type DirectoryUser,
   type EmailInvitation,
   type Invited,
@@ -23,14 +24,17 @@ import {
   type SidebarRoom,
   type WorkspaceSettings,
 } from "@ember/protocol";
-import { TOP_LEVELS, type AnswerLevelChanges } from "@ember/protocol/assistant";
+import { ASSISTANT_MODELS, TOP_LEVELS, modelName, type AssistantChanges, type AssistantSettings, type NewAssistantModel } from "@ember/protocol/assistant";
 import { FlashProvider } from "@/components/flash";
 import { Sheet } from "@/components/ui/sheet";
 import { AccountContext } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { navigate, WORKSPACE_SETTINGS_PATH } from "@/hooks/use-route";
 import { ApiError } from "@/lib/api";
-import { HOW_COPIES_UPDATE } from "./ember-version";
+// Ember's own Update Ember workflow, which the card offers a copy without one: the copy beside the deploy
+// script, which CI keeps the same as .github's, since a copy's .github keeps its own workflow, or none.
+import EMBERS_WORKFLOW from "../../../../worker/scripts/update-ember.yml?raw";
+import { HOW_COPIES_UPDATE, HOW_THIS_COPY_UPDATES, HOW_TO_ADD_THE_WORKFLOW } from "./ember-version";
 import { CONFIRM_REMOVE } from "./people-list";
 import { workspaceSectionPath, type WorkspaceSection } from "./settings-navigation";
 import { CHANGES_SAVED } from "./settings-page";
@@ -51,6 +55,7 @@ const asAdministrator: WorkspaceSettings = {
   memberfulWebhooks: false,
   turnstile: null,
   assistant: null,
+  cloudflareAccountId: null,
   email: { provider: "cloudflare", resendKey: null, cloudflare: true, from: null },
   invitations: [],
   emailDomains: [],
@@ -105,6 +110,9 @@ interface Answers {
 
 /** The workspace's logo once one is uploaded. */
 const LOGO = "/account/logo?v=20261017120000";
+
+/** @ember's avatar while it's Ember's flame. */
+const EMBER_FLAME = "/users/ember.abc/avatar?v=20261101120000";
 
 /** Answers the page's requests as the server would for `settings`, or as `answers` says. */
 function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, removed, ordered, logoSaved }: Answers = {}) {
@@ -174,13 +182,35 @@ function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, r
         turnstile = null;
         return Response.json({ turnstile });
       case "PUT /api/account/assistant": {
-        const { accountId, model } = JSON.parse(String(init?.body)) as AssistantSetup;
-        assistant = { accountId, model, most: assistant?.most ?? TOP_LEVELS };
+        const { accountId, model, modelName: name } = JSON.parse(String(init?.body)) as AssistantSetup;
+        assistant = {
+          accountId,
+          model,
+          models: [{ id: model, name: name ?? modelName(model), format: "chat" }],
+          most: assistant?.most ?? TOP_LEVELS,
+          webTools: null,
+          avatarUrl: assistant?.avatarUrl ?? EMBER_FLAME,
+          avatar: assistant?.avatar ?? false,
+        };
         return Response.json({ assistant, greeting: "Hello, team!" });
       }
-      case "PATCH /api/account/assistant":
-        assistant = assistant && { ...assistant, most: { ...assistant.most, ...(JSON.parse(String(init?.body)) as AnswerLevelChanges) } };
+      case "PATCH /api/account/assistant": {
+        const { model, ...levels } = JSON.parse(String(init?.body)) as AssistantChanges;
+        assistant = assistant && { ...assistant, model: model ?? assistant.model, most: { ...assistant.most, ...levels } };
         return Response.json({ assistant });
+      }
+      case "POST /api/account/assistant/catalog":
+        return Response.json({ models: ASSISTANT_MODELS, refusal: null });
+      case "POST /api/account/assistant/models": {
+        const { model, modelName: name } = JSON.parse(String(init?.body)) as NewAssistantModel;
+        assistant = assistant && { ...assistant, models: [...assistant.models, { id: model, name: name ?? modelName(model), format: "chat" }] };
+        return Response.json({ assistant, greeting: "Hi there!" });
+      }
+      case "DELETE /api/account/assistant/models": {
+        const { model } = JSON.parse(String(init?.body)) as { model: string };
+        assistant = assistant && { ...assistant, models: assistant.models.filter(({ id }) => id !== model) };
+        return Response.json({ assistant });
+      }
       case "DELETE /api/account/assistant":
         assistant = null;
         return Response.json({ assistant });
@@ -383,37 +413,66 @@ describe("Version", () => {
   /** Ember 0.2's page on GitHub, with its notes. */
   const NOTES = "https://github.com/NYLLON-SOFTWARE/ember-cloudflare/releases/tag/v0.2.0";
   const card = () => screen.findByRole("region", { name: /^Ember \d/ });
+  /** What the Worker says of a copy on GitHub, as its deploy told it, while Ember 0.2 is out, if `copy` is given. */
+  const newerFor = (copy: CopyOnGitHub | null = null): ReleaseCheck => ({ release: "0.1", newest: { release: "0.2", notes: NOTES, newer: true }, copy });
+  /** The card's links, by name, which each open in a new tab. */
+  function linksIn(shown: HTMLElement): Record<string, string | null> {
+    const links = within(shown).getAllByRole("link");
+    for (const link of links) {
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noopener");
+    }
+    return Object.fromEntries(links.map((link) => [link.textContent, link.getAttribute("href")]));
+  }
 
-  it("shows administrators which release this is once the Worker has said, at the end of General", async () => {
-    release = { release: "0.1", newest: { release: "0.1", notes: NOTES, newer: false } };
-    showPage();
-    const shown = await card();
-    expect(shown).toHaveTextContent(/^Ember 0\.1This is the newest release\.$/);
-    expect(within(shown).queryByRole("link")).not.toBeInTheDocument();
-    const general = screen.getByRole("region", { name: "Basic community settings" });
-    expect(general.lastElementChild).toBe(shown);
-  });
+  it.each([null, { repository: "someone/my-ember", branch: "main", workflow: true }])(
+    "shows administrators which release this is once the Worker has said, at the end of General (copy: %j)",
+    async (copy) => {
+      release = { release: "0.1", newest: { release: "0.1", notes: NOTES, newer: false }, copy };
+      showPage();
+      const shown = await card();
+      expect(shown).toHaveTextContent(/^Ember 0\.1This is the newest release\.$/);
+      expect(within(shown).queryByRole("link")).not.toBeInTheDocument();
+      const general = screen.getByRole("region", { name: "Basic community settings" });
+      expect(general.lastElementChild).toBe(shown);
+    },
+  );
 
   it("says when a newer release is out, with its notes and how to update", async () => {
-    release = { release: "0.1", newest: { release: "0.2", notes: NOTES, newer: true } };
+    release = newerFor();
     showPage();
     const shown = await card();
     expect(within(shown).getByRole("heading", { level: 2 })).toHaveTextContent("Ember 0.2 is available");
     expect(shown).toHaveTextContent("This is Ember 0.1.");
     expect(shown).toHaveTextContent(HOW_COPIES_UPDATE);
-    for (const [name, href] of [
-      ["What's new", NOTES],
-      ["How to update", UPDATING_EMBER],
-    ]) {
-      const link = within(shown).getByRole("link", { name });
-      expect(link).toHaveAttribute("href", href);
-      expect(link).toHaveAttribute("target", "_blank");
-      expect(link).toHaveAttribute("rel", "noopener");
-    }
+    expect(linksIn(shown)).toEqual({ "What's new": NOTES, "How to update": UPDATING_EMBER });
+  });
+
+  it("links a copy that has the Update Ember workflow straight to it on GitHub, to run", async () => {
+    release = newerFor({ repository: "someone/my-ember", branch: "main", workflow: true });
+    showPage();
+    const shown = await card();
+    expect(shown).toHaveTextContent(HOW_THIS_COPY_UPDATES);
+    expect(linksIn(shown)).toEqual({ "What's new": NOTES, "Open GitHub action to update": "https://github.com/someone/my-ember/actions/workflows/update-ember.yml" });
+  });
+
+  it("links a copy without it to GitHub's editor, on the branch that deploys, with Ember's workflow filled in to commit", async () => {
+    release = newerFor({ repository: "someone/my-ember", branch: "release/v1#stable", workflow: false });
+    showPage();
+    const shown = await card();
+    expect(shown).toHaveTextContent(HOW_TO_ADD_THE_WORKFLOW);
+    const { "Add GitHub action to update": add, ...others } = linksIn(shown);
+    expect(others).toEqual({ "What's new": NOTES });
+    const editor = new URL(add!);
+    expect(`${editor.origin}${editor.pathname}`).toBe("https://github.com/someone/my-ember/new/release/v1%23stable");
+    expect([...editor.searchParams]).toEqual([
+      ["filename", ".github/workflows/update-ember.yml"],
+      ["value", EMBERS_WORKFLOW],
+    ]);
   });
 
   it("says when GitHub didn't say whether a newer release is out", async () => {
-    release = { release: "0.1", newest: null };
+    release = { release: "0.1", newest: null, copy: null };
     showPage();
     expect(await card()).toHaveTextContent(/^Ember 0\.1GitHub didn't say whether a newer release is out\.$/);
   });
@@ -423,7 +482,7 @@ describe("Version", () => {
     await nameField();
     expect(screen.queryByText(/^Ember \d/)).not.toBeInTheDocument();
     cleanup();
-    release = { release: "0.1", newest: { release: "0.2", notes: NOTES, newer: true } };
+    release = newerFor();
     serve(asMember);
     showPage(asLinus);
     expect(await screen.findByRole("heading", { level: 2, name: "Analytical Engines" })).toBeInTheDocument();
@@ -1649,6 +1708,16 @@ describe("Check that people are people with Cloudflare Turnstile", () => {
 
 describe("Ember AI", () => {
   showingSection("assistant-settings");
+  /** Ember AI on GLM-4.7 Flash, the only model people can pick. */
+  const ON: AssistantSettings = {
+    accountId: "0123456789abcdef0123456789abcdef",
+    model: "@cf/zai-org/glm-4.7-flash",
+    models: [{ id: "@cf/zai-org/glm-4.7-flash", name: "GLM-4.7 Flash", format: "chat" }],
+    most: TOP_LEVELS,
+    webTools: null,
+    avatarUrl: EMBER_FLAME,
+    avatar: false,
+  };
 
   it("gives administrators the Ember AI card, whose switch sets up Ember AI, naming the model it saved", async () => {
     const { user } = showPage();
@@ -1671,8 +1740,18 @@ describe("Ember AI", () => {
     expect(await screen.findByRole("textbox", { name: "Account ID" })).toHaveValue("0123456789abcdef0123456789abcdef");
   });
 
+  it("fills in the Cloudflare account Ember is deployed to when the switch sets up Ember AI", async () => {
+    serve({ ...asAdministrator, cloudflareAccountId: "0123456789abcdef0123456789abcdef" });
+    const { user } = showPage();
+    const card = await screen.findByRole("region", { name: "Ember AI" });
+    await user.click(within(card).getByRole("switch", { name: "Ember AI" }));
+    const accountId = await screen.findByRole("textbox", { name: "Account ID" });
+    expect(accountId).toHaveValue("0123456789abcdef0123456789abcdef");
+    expect(accountId).toHaveAccessibleDescription("Ember is deployed to this account. To ask through another, paste that account's ID.");
+  });
+
   it("turns Ember AI off once the administrator confirms", async () => {
-    serve({ ...asAdministrator, assistant: { accountId: "0123456789abcdef0123456789abcdef", model: "@cf/zai-org/glm-4.7-flash", most: TOP_LEVELS } });
+    serve({ ...asAdministrator, assistant: ON });
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const { user } = showPage();
     const card = await screen.findByRole("region", { name: "Ember AI" });
@@ -1684,7 +1763,7 @@ describe("Ember AI", () => {
   });
 
   it("changes the most @ember may think and write for anyone on the card, at once", async () => {
-    serve({ ...asAdministrator, assistant: { accountId: "0123456789abcdef0123456789abcdef", model: "@cf/zai-org/glm-4.7-flash", most: TOP_LEVELS } });
+    serve({ ...asAdministrator, assistant: ON });
     const { user } = showPage();
     const card = await screen.findByRole("region", { name: "Ember AI" });
     const thinking = within(card).getByRole("group", { name: "Thinking" });
@@ -1695,6 +1774,26 @@ describe("Ember AI", () => {
     expect(within(thinking).getByRole("radio", { name: "Low" })).toBeChecked();
     expect(thinking).toHaveTextContent("Thinks a little first, up to about 4,000 tokens.");
     expect(fetch).toHaveBeenCalledWith("/api/account/assistant", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ thinking: "low" }) }));
+  });
+
+  it("lets administrators add a model people can pick, choose it to answer everyone, and remove another", async () => {
+    serve({ ...asAdministrator, assistant: ON });
+    const { user } = showPage();
+    const card = await screen.findByRole("region", { name: "Ember AI" });
+    await user.click(within(card).getByRole("button", { name: "Add a model" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add a model" });
+    await user.selectOptions(await within(dialog).findByRole("combobox", { name: "Model" }), "GPT-6.1 Sol");
+    await user.click(within(dialog).getByRole("button", { name: "Add" }));
+    expect(await screen.findByText("Hi there!")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    const models = within(card).getByRole("group", { name: "Models" });
+    await user.click(within(models).getByRole("radio", { name: "GPT-6.1 Sol" }));
+    await waitFor(() => expect(card).toHaveTextContent("@ember runs on GPT-6.1 Sol through Cloudflare AI Gateway, or on the model each person picks."));
+    await user.click(within(models).getByRole("button", { name: "Remove GLM-4.7 Flash" }));
+    await waitFor(() => expect(within(models).getAllByRole("radio").map((radio) => radio.closest("label")?.textContent)).toEqual(["GPT-6.1 Sol"]));
+    expect(card).toHaveTextContent("@ember runs on GPT-6.1 Sol through Cloudflare AI Gateway.");
   });
 
   it("tells members that administrators manage it, with no card", async () => {

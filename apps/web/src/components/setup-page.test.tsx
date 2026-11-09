@@ -249,9 +249,9 @@ describe("Installer-protected setup link", () => {
     expect(screen.getByText("Ember is waiting for its administrator.")).toBeInTheDocument();
     expect(linkShape()).toBeInTheDocument();
     expect(screen.getByText("pnpm run deploy")).toBeInTheDocument();
-    // Made where it can be seen, then given to `wrangler secret put`, which asks for it, rather than piped out of sight.
-    expect(screen.getByText("openssl rand -hex 32")).toBeInTheDocument();
-    expect(screen.getByText("wrangler secret put EMBER_SETUP_TOKEN")).toBeInTheDocument();
+    // Without the link, a setup password set in the dashboard opens setup instead.
+    expect(screen.getByText("EMBER_SETUP_PASSWORD")).toBeInTheDocument();
+    expect(screen.getByText(/If it's lost, give the Worker a setup password instead: set/)).toBeInTheDocument();
     expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Skip to main content" })).toBeInTheDocument();
@@ -268,13 +268,14 @@ describe("Installer-protected setup link", () => {
     expect(location.hash).toBe("");
   });
 
-  it("says nobody can set Ember up while the deployment has no setup token, and how to give it one", () => {
+  it("says nobody can set Ember up while the deployment has neither a setup password nor a token, and how to give it a password", () => {
     render(<SetupPage placeholders={DEFAULTS} access="closed" onSetUp={() => {}} />);
     expect(screen.getByText("Nobody can set it up yet.")).toBeInTheDocument();
-    expect(screen.getByText("This deployment has no setup token, so there's no setup link to open.")).toBeInTheDocument();
-    expect(screen.getByText("wrangler secret put EMBER_SETUP_TOKEN")).toBeInTheDocument();
-    expect(screen.getByText(`${location.origin}/first_run#token=<the token>`)).toBeInTheDocument();
+    expect(screen.getByText("This deployment has no setup password, so nobody can set it up.")).toBeInTheDocument();
+    expect(screen.getByText("EMBER_SETUP_PASSWORD")).toBeInTheDocument();
+    expect(screen.getByText(/in the Cloudflare dashboard, in this Worker's Settings under Variables and Secrets, then reload this page/)).toBeInTheDocument();
     expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
   });
 
   it("shows the form even without a token where setup is open, whatever the address says", () => {
@@ -291,6 +292,156 @@ describe("Installer-protected setup link", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("This setup link isn't this deployment's. Open the one its latest deploy printed");
     expect(screen.getByLabelText("Name")).toHaveValue("Ada Lovelace");
     expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+  });
+});
+
+describe("Setup password", () => {
+  const password = "correct horse battery staple";
+  const setupPasswordField = () => screen.getByLabelText("Setup password");
+  /** The Worker's answers to the page's posts, in turn. */
+  const answers = (...responses: Array<[number, object | null]>) => {
+    const fetch = vi.spyOn(globalThis, "fetch");
+    for (const [status, body] of responses) fetch.mockResolvedValueOnce(body === null ? new Response(null, { status }) : Response.json(body, { status }));
+    return fetch;
+  };
+  const authorizationOf = (call: Parameters<typeof fetch>) => new Headers(call[1]!.headers).get("Authorization");
+
+  async function typeSetupPassword(typed: string) {
+    const user = userEvent.setup();
+    await user.type(setupPasswordField(), typed);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    return user;
+  }
+
+  it("asks for the setup password first, in the form's place, saying what to do if it's forgotten", () => {
+    history.replaceState(null, "", "/first_run");
+    render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={() => {}} />);
+    expect(document.title).toBe("Set up Ember");
+    expect(screen.getByRole("heading", { level: 1, name: "Set up Ember" })).toBeInTheDocument();
+    expect(screen.getByText("Ember is waiting for its administrator.")).toBeInTheDocument();
+    const field = setupPasswordField();
+    expect(field).toHaveFocus();
+    expect(field).toMatchObject({ type: "password", required: true });
+    // Nothing for a password manager to fill in or keep.
+    expect(field).toHaveAttribute("autocomplete", "off");
+    expect(field).toHaveAccessibleDescription("The one you gave Ember when you deployed it.");
+    expect(screen.getByText("EMBER_SETUP_PASSWORD")).toBeInTheDocument();
+    expect(screen.getByText(/a new value in the Cloudflare dashboard, in this Worker's Settings under Variables and Secrets, then type that one/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Skip to main content" })).toBeInTheDocument();
+  });
+
+  it("shows and hides the setup password", async () => {
+    render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={() => {}} />);
+    const toggle = screen.getByRole("button", { name: "Show password" });
+    expect(toggle).toHaveAttribute("aria-controls", setupPasswordField().id);
+    await userEvent.click(toggle);
+    expect(setupPasswordField()).toHaveAttribute("type", "text");
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("has the Worker check the setup password, then opens the form, which sends it too, encoded as a header needs", async () => {
+    const typed = `Pässwört "${password}"`;
+    const fetch = answers([204, null], [201, workspace]);
+    const onSetUp = vi.fn();
+    render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={onSetUp} />);
+    await typeSetupPassword(typed);
+
+    expect(await screen.findByLabelText("Name")).toHaveFocus();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0]![0]).toBe("/api/first_run/check");
+    expect(fetch.mock.calls[0]![1]!.method).toBe("POST");
+    expect(authorizationOf(fetch.mock.calls[0]!)).toBe(`Bearer ${encodeURIComponent(typed)}`);
+    expect(screen.getByText("Create the admin account for your workspace.")).toBeInTheDocument();
+
+    await fillIn("correct horse");
+    await waitFor(() => expect(onSetUp).toHaveBeenCalledWith(workspace));
+    expect(fetch.mock.calls[1]![0]).toBe("/api/first_run");
+    expect(authorizationOf(fetch.mock.calls[1]!)).toBe(`Bearer ${encodeURIComponent(typed)}`);
+    expect(JSON.parse(String(sent()))).toEqual({ name: "Ada Lovelace", emailAddress: "ada@example.com", password: "correct horse" });
+  });
+
+  it("says why the Worker refused a setup password, beneath its field, and lets it be typed again", async () => {
+    const fetch = answers([403, { error: "That isn't this Ember's setup password" }], [204, null]);
+    render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={() => {}} />);
+    const user = await typeSetupPassword("not the password");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("That isn't this Ember's setup password");
+    const field = setupPasswordField();
+    expect(field).toHaveAccessibleDescription("That isn't this Ember's setup password");
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveValue("");
+    expect(field).toHaveFocus();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+
+    await user.type(field, password);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByLabelText("Name")).toBeInTheDocument();
+    expect(authorizationOf(fetch.mock.calls[1]!)).toBe(`Bearer ${encodeURIComponent(password)}`);
+  });
+
+  it("says so above the card past the limit of tries, keeping what was typed", async () => {
+    answers([429, { error: "Too many tries at the setup password. Please wait a few minutes and try again." }]);
+    render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={() => {}} />);
+    await typeSetupPassword(password);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Too many tries at the setup password. Please wait a few minutes and try again.");
+    expect(setupPasswordField()).toHaveValue(password);
+    expect(setupPasswordField()).not.toHaveAttribute("aria-invalid");
+    expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+  });
+
+  it("says so when Ember can't be reached", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("Failed to fetch"));
+    render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={() => {}} />);
+    await typeSetupPassword(password);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't reach Ember. Check your connection and try again.");
+    expect(setupPasswordField()).toHaveValue(password);
+  });
+
+  it("goes home where someone else set Ember up first", async () => {
+    answers([409, { error: "Ember is already set up", redirect: "/" }]);
+    render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={() => {}} />);
+    await typeSetupPassword(password);
+    await waitFor(() => expect(loadPage).toHaveBeenCalledWith("/"));
+  });
+
+  it("opens the form without asking where the setup link brings a token the Worker takes, as a deploy may have printed one too", async () => {
+    const token = "e2e1".repeat(16);
+    history.replaceState(null, "", `/first_run#token=${token}`);
+    const fetch = answers([204, null], [201, workspace]);
+    render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={() => {}} />);
+    expect(await screen.findByLabelText("Name")).toHaveFocus();
+    expect(screen.queryByLabelText("Setup password")).not.toBeInTheDocument();
+    await fillIn("correct horse");
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(fetch.mock.calls.map(([path]) => path)).toEqual(["/api/first_run/check", "/api/first_run"]);
+    for (const call of fetch.mock.calls) expect(authorizationOf(call)).toBe(`Bearer ${token}`);
+  });
+
+  it("opens the form with the setup link where Ember couldn't be reached to check it, as the form has it checked again", async () => {
+    const token = "e2e1".repeat(16);
+    history.replaceState(null, "", `/first_run#token=${token}`);
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("Failed to fetch")).mockResolvedValueOnce(Response.json(workspace, { status: 201 }));
+    const onSetUp = vi.fn();
+    render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={onSetUp} />);
+    expect(await screen.findByLabelText("Name")).toBeInTheDocument();
+    await fillIn("correct horse");
+    await waitFor(() => expect(onSetUp).toHaveBeenCalledWith(workspace));
+    expect(authorizationOf(fetch.mock.calls[1]!)).toBe(`Bearer ${token}`);
+  });
+
+  it("asks for the setup password where the setup link it opens with is out of date", async () => {
+    history.replaceState(null, "", `/first_run#token=${"0".repeat(64)}`);
+    const fetch = answers([403, { error: "That isn't this Ember's setup password" }], [204, null]);
+    render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={() => {}} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("That setup link is out of date. Type this Ember's setup password instead.");
+    expect(setupPasswordField()).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+
+    await typeSetupPassword(password);
+    expect(await screen.findByLabelText("Name")).toBeInTheDocument();
+    expect(authorizationOf(fetch.mock.calls[1]!)).toBe(`Bearer ${encodeURIComponent(password)}`);
   });
 });
 

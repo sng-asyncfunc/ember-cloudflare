@@ -1,6 +1,7 @@
 // What the Worker's entry point and the browser's both export: everything that doesn't parse.
 
 export { cardAddress, MENTION_CONTENT_TYPE, OPENGRAPH_EMBED_CONTENT_TYPE, type MentionUser, type ResolveMention } from "./attachments";
+export { hasLinkable } from "./autolink";
 export { bodyFromPlainText, type PreparedBody } from "./body";
 export { displayMarkup, type DisplayElement, type DisplayMention, type DisplayNode, type DisplayPreview, type DisplayText } from "./display";
 export { isAllEmoji } from "./emoji";

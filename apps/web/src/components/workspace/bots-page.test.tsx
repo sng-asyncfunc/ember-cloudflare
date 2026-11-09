@@ -77,11 +77,17 @@ afterEach(() => {
 });
 
 describe("Chat bots page", () => {
-  it("is the Chat bots page, with Add a chat bot, and Go Back to workspace settings", () => {
+  it("is the Chat bots page, saying what bots do, with Add a chat bot, and Go Back to workspace settings", () => {
     showPage();
     expect(document.title).toBe("Chat bots");
     expect(screen.getByRole("heading", { level: 1, name: "Chat bots" })).toBeInTheDocument();
-    expect(screen.getByText("With Chat bots, other sites and services can post updates directly to Ember.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Chat bots let other apps and services post in your rooms, and reply when people talk to them. " +
+          "Each of a bot's rooms gets two addresses below, one for posting text or a file and one that takes a Slack incoming webhook's payload. " +
+          "Give a bot a webhook URL, and Ember sends it every message that @mentions it or is sent to it in a DM, then posts whatever it answers within 30 seconds.",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Add a chat bot" })).toHaveAttribute("href", "/account/bots/new");
     expect(screen.getByRole("link", { name: "Go Back" })).toHaveAttribute("href", "/account/edit");
   });
@@ -195,9 +201,10 @@ describe("Slack-compatible webhooks", () => {
 });
 
 describe("Translation buttons", () => {
-  it("has a translation button for Chat bots once an administrator shows them", () => {
+  it("has a translation button for Chat bots once an administrator shows them, giving the page's name and first sentence", () => {
     showPage({ ...account, hideTranslationButtons: false });
     expect(screen.getByText("Translate")).toBeInTheDocument();
+    expect(screen.getByText("Chat bots. Chat bots let other apps and services post in your rooms, and reply when people talk to them.")).toBeInTheDocument();
   });
 
   it("has none while they're hidden", () => {

@@ -4,15 +4,13 @@ import { expect, test, type Member } from "./fixtures";
 /** The reactions under the message whose text includes `text`, as `member` sees them. */
 const reactions = (member: Member, text: string) => member.message(text).getByRole("list", { name: "Reactions" });
 
-/** Reacts to the message whose text includes `text` from its bar, which the pointer opens as it comes back to the message. */
+/** Reacts to the message whose text includes `text` from its bar. */
 async function react(member: Member, text: string, name: string) {
-  await member.composer().hover();
   await (await member.actions(text)).getByRole("button", { name }).click();
 }
 
 /** Opens New boost's form on the message whose text includes `text`, from its bar's tray, and returns its field. */
 async function newBoost(member: Member, text: string): Promise<Locator> {
-  await member.composer().hover();
   const bar = await member.actions(text);
   await bar.getByRole("button", { name: "More reactions" }).click();
   await bar.getByRole("button", { name: "New boost" }).click();
@@ -117,17 +115,23 @@ test.describe("Custom reactions", () => {
     const field = await newBoost(ada, text);
     await expect(field).toHaveAttribute("maxlength", "16");
     const submit = ada.message(text).getByRole("button", { name: "Add reaction" });
-    await submit.click();
+    // Add reaction shows once something's written, and Enter sends nothing blank.
+    await expect(submit).toHaveCount(0);
+    await field.press("Enter");
     expect(await field.evaluate((input: HTMLInputElement) => input.validity.valueMissing)).toBe(true);
+    const asWideAsItsPlaceholder = (await field.boundingBox())!.width;
     await field.fill("  ");
+    await field.press("Enter");
     expect(await field.evaluate((input: HTMLInputElement) => input.validity.patternMismatch)).toBe(true);
     await field.fill("Lovely!");
+
+    // The form is a one-line pill, its field as wide as what's written.
+    const formBox = (await ada.message(text).locator("form").boundingBox())!;
     const fieldBox = (await field.boundingBox())!;
     const submitBox = (await submit.boundingBox())!;
-    expect(fieldBox.width).toBeGreaterThanOrEqual(240);
-    expect(fieldBox.height).toBeGreaterThanOrEqual(40);
-    // The buttons have a row of their own under the field.
-    expect(submitBox.y).toBeGreaterThanOrEqual(fieldBox.y + fieldBox.height + 10);
+    expect(formBox.height).toBeLessThanOrEqual(32);
+    expect(fieldBox.width).toBeLessThan(asWideAsItsPlaceholder);
+    expect(Math.abs(submitBox.y + submitBox.height / 2 - (fieldBox.y + fieldBox.height / 2))).toBeLessThanOrEqual(1);
 
     await submit.click();
     await expect(field).toHaveCount(0);

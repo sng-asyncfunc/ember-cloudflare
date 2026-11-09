@@ -122,7 +122,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
   const [memberful, setMemberful] = useState<boolean | null>(null);
   /** Whether you need Memberful to sign in while it's members only, unlike administrators and the people they invite. */
   const [membershipNeeded, setMembershipNeeded] = useState(true);
-  /** How much @ember thinks and how long it answers you, or null while Ember AI is off. */
+  /** Which model @ember answers you with, how much it thinks and how long its answers are, or null while Ember AI is off. */
   const [assistant, setAssistant] = useState<Profile["assistant"]>(null);
   const [saving, setSaving] = useState(false);
   const passwordInput = useRef<HTMLInputElement>(null);
@@ -142,8 +142,8 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
         saved.current = fieldsOf(answer.profile);
         setFields(saved.current);
         showAnswer(answer);
-        // Only from here and the dials' own saves, as a save of the profile or a photo can answer after a
-        // dial's, with your levels from before it.
+        // Only from here and the Ember AI section's own saves, as a save of the profile or a photo can
+        // answer after a change there, with your model and levels from before it.
         setAssistant(answer.profile.assistant);
       },
       (error: unknown) => {

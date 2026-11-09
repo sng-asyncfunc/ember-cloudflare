@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { opensLink, pressedAlone, savesEdit, sendsMessage } from "./keyboard";
+import { opensFind, opensLink, pressedAlone, savesEdit, sendsMessage } from "./keyboard";
 
 function pointer(coarse: boolean) {
   vi.stubGlobal("matchMedia", (query: string) => ({ matches: query === "(pointer: coarse)" && coarse }));
@@ -90,5 +90,37 @@ describe("pressedAlone", () => {
     for (const modifier of ["ctrlKey", "metaKey", "altKey", "shiftKey", "isComposing"]) {
       expect(pressedAlone(press("ArrowUp", { [modifier]: true }), "ArrowUp"), modifier).toBe(false);
     }
+  });
+});
+
+describe("opensFind", () => {
+  /** The keyboard of a device whose `navigator.platform` is `platform`. */
+  const on = (platform: string) => vi.stubGlobal("navigator", { ...navigator, platform });
+
+  it("takes Ctrl+F, in either case, but on Apple's devices", () => {
+    on("Win32");
+    expect(opensFind(press("f", { ctrlKey: true }))).toBe(true);
+    expect(opensFind(press("F", { ctrlKey: true }))).toBe(true);
+    expect(opensFind(press("f", { metaKey: true }))).toBe(false);
+    on("Linux x86_64");
+    expect(opensFind(press("f", { ctrlKey: true }))).toBe(true);
+  });
+
+  it("takes Cmd+F on a Mac, iPad or iPhone, where Ctrl+F moves the caret on in a field", () => {
+    for (const platform of ["MacIntel", "iPad", "iPhone"]) {
+      on(platform);
+      expect(opensFind(press("f", { metaKey: true })), platform).toBe(true);
+      expect(opensFind(press("f", { ctrlKey: true })), platform).toBe(false);
+    }
+  });
+
+  it("leaves F with other modifiers, alone, or while an input method composes", () => {
+    on("Win32");
+    expect(opensFind(press("f"))).toBe(false);
+    expect(opensFind(press("f", { ctrlKey: true, shiftKey: true }))).toBe(false);
+    expect(opensFind(press("f", { ctrlKey: true, altKey: true }))).toBe(false);
+    expect(opensFind(press("f", { ctrlKey: true, metaKey: true }))).toBe(false);
+    expect(opensFind(press("f", { ctrlKey: true, isComposing: true }))).toBe(false);
+    expect(opensFind(press("g", { ctrlKey: true }))).toBe(false);
   });
 });

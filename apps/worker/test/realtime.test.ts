@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatRoom } from "../src/chat-room";
 import type { Env } from "../src/env";
 import { STORED_CLIENT_MESSAGE_IDS } from "../src/store";
-import { connect, freshRoom, post, roomSql, roomStub, settle, signIn } from "./support";
+import { connect, freshRoom, post, roomSql, roomStub, settle, sharedD1, signIn } from "./support";
 
 const names = (users: { name: string }[]) => users.map((u) => u.name).sort();
 
@@ -174,7 +174,7 @@ describe("Catch up after a reconnect", () => {
 
   it("names the messages it couldn't check", async () => {
     // Only a Durable Object's storage can be broken for one room without breaking the tests beside it.
-    if ((env as { DB?: D1Database }).DB) return;
+    if (sharedD1()) return;
     const room = await freshRoom("check-fails");
     const ada = await connect(room, "Ada");
     await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => {

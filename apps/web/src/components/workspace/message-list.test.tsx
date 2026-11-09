@@ -374,6 +374,19 @@ describe("Scroll back through history", () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 
+  it("goes by the browser's last look at each end when it tells of more than one at once", () => {
+    const onLoadOlder = vi.fn();
+    const onLoadNewer = vi.fn();
+    render(list({ messages: messages(1, 2), hasMore: true, hasNewer: true }, onLoadOlder, null, { onLoadNewer }));
+    const [older, newer] = FakeIntersectionObserver.observers;
+    // The top was out of view, then the reader scrolled to it, before the browser told of either.
+    act(() => older!.callback([{ isIntersecting: false }, { isIntersecting: true }]));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    // And the bottom came into view, then went out of it.
+    act(() => newer!.callback([{ isIntersecting: true }, { isIntersecting: false }]));
+    expect(onLoadNewer).not.toHaveBeenCalled();
+  });
+
   it("keeps loading while a tall window still shows the top, but not after a failed page", () => {
     FakeIntersectionObserver.inView.top = true;
     const onLoadOlder = vi.fn();

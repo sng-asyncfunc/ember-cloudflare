@@ -43,8 +43,8 @@ optional settings, such as push notifications' keys, go in a `.dev.vars` beside 
 
 Open http://localhost:5173 and set up Ember: the first visitor creates the workspace's administrator
 and its rooms, general and random. Then open a second browser, pick a name, and chat with yourself.
-On localhost setup is open to whoever's there; a deployed Worker takes the setup link its deploy
-prints ([Deploying](self-hosting.md#deploying)).
+On localhost setup is open to whoever's there; a deployed Worker takes its setup password, or the
+setup link its deploy prints ([Deploying](self-hosting.md#deploying)).
 
 Or, before setting it up, run `pnpm seed` to have a made-up team set it up and fill its rooms and DMs
 with conversations that use everything a message can: threads, quotes, mentions, reactions, pictures,
@@ -110,7 +110,11 @@ and may skip any number of releases or go back one, so:
 - A migration adds to the tables rather than takes away, so the release before still runs on what it
   leaves: drop a column or table a release after the code stops using it.
 - `.github/workflows/update-ember.yml` stays as it is, since an update can't change a copy's
-  workflows: change `apps/worker/scripts/update-ember.ts`, which updates bring, instead.
+  workflows: change `apps/worker/scripts/update-ember.ts`, which updates bring, instead. Its copy
+  beside that script, which the deploy and General's release card offer copies without the
+  workflow, as Deploy to Cloudflare's are, is the same file, as CI checks. The tests read that
+  copy, never `.github`, since a copy's `.github` keeps its own workflow, or none, and a copy's
+  owner may run them.
 - Ember's other workflows run only in its own repository, and `pnpm run deploy` stays the deploy
   command, which every copy's Workers Builds runs.
 

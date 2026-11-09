@@ -9,6 +9,7 @@ import {
   useState,
   type ComponentProps,
   type MouseEvent,
+  type ReactElement,
   type Ref,
   type RefObject,
 } from "react";
@@ -17,6 +18,7 @@ import type { DisplayNode } from "@ember/richtext/dom";
 import { ChatPlusIn, Copy, Download, Edit, Emoji, MessageText, MoreHoriz, QuoteMessage, ShareAndroid, Trash } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { ShareButton } from "@/components/share-button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { mentionedPerson, PeopleContext, useNameOf } from "@/hooks/use-directory";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { permalinkOf } from "@/hooks/use-route";
@@ -56,6 +58,8 @@ interface Props {
   nodes: DisplayNode[];
   /** The message's row: hovering it opens the bar with a mouse, and the bar overlaps its top edge. */
   row: RefObject<HTMLElement | null>;
+  /** Whether the message follows on from the one before, rather than starting a run, whose row has 4px more above it. */
+  threaded: boolean;
   /** Whether Edit and Delete message show: on your own messages, and on everyone's for administrators. */
   editable: boolean;
   /**
@@ -85,17 +89,18 @@ export interface MessageActionsHandle {
 }
 
 /**
- * The message actions: Message options, which opens a bar of three quick reactions, Reply in thread, a file
- * message's Download, Copy link, Edit and More reactions, whose tray holds the other reactions and New
- * boost. With a mouse, hovering the message opens the bar too, laid over the message's top edge at the
- * timeline's right, with Message options pinned as its last button. On touch screens it opens beside
- * Message options, with Quote after Reply in thread. Once opened, the bar stays in the page while it's
+ * The message actions: Message options, which opens a bar of three quick reactions, More reactions, whose
+ * tray holds the other reactions and New boost, Reply in thread, a file message's Download, and Edit, in the
+ * order Slack's bar has them. With a mouse, hovering the message opens the bar too, laid over the message's
+ * top edge at the timeline's right, with Message options pinned as its last button, and each button names
+ * itself in a tooltip as the pointer reaches it. On touch screens it opens beside Message options, with
+ * Quote after Reply in thread and Copy link after that. Once opened, the bar stays in the page while it's
  * shut, so Copy link keeps its color.
  *
  * With a mouse, Message options then opens More actions under the bar, as Slack's does: Quote, Copy text,
  * Copy link, and on messages you can change, Edit message and Delete message.
  */
-export function MessageActionsMenu({ message, nodes, row, editable, threadPath, onReact, onQuote, onEdit, onDelete, onNewBoost, ref }: Props) {
+export function MessageActionsMenu({ message, nodes, row, threaded, editable, threadPath, onReact, onQuote, onEdit, onDelete, onNewBoost, ref }: Props) {
   const [open, setOpen] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
@@ -103,9 +108,9 @@ export function MessageActionsMenu({ message, nodes, row, editable, threadPath, 
   // Whether hovering opened the bar, which leaving then closes, unless Message options pinned it.
   const hoverOpened = useRef(false);
   const leaveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  // The Add a boost that opened the bar, if one did and More actions hasn't opened since, and whether its first
-  // reaction is still to be focused.
+  // The Add a boost that opened the bar, if one did and More actions hasn't opened since.
   const boostTrigger = useRef<HTMLElement | null>(null);
+  // Whether the tray's first reaction is still to be focused, as Add a boost or More reactions opens it.
   const focusingTray = useRef(false);
   // Whether More actions' first item is still to be focused, as it opens.
   const focusingActions = useRef(false);
@@ -185,10 +190,13 @@ export function MessageActionsMenu({ message, nodes, row, editable, threadPath, 
     actionsPanel.current?.querySelector("button")?.focus({ preventScroll: true });
   };
 
-  // The tray and More actions open in the same place, under the bar, so one shuts as the other opens.
+  // The tray and More actions open in the same place, under the bar, so one shuts as the other opens. The
+  // tray's first reaction takes focus as it opens, as More actions' first item does, since Tab from More
+  // reactions reaches the rest of the bar first.
   const toggleTray = () => {
+    focusingTray.current = !trayOpen;
     setActionsOpen(false);
-    setTrayOpen((shown) => !shown);
+    setTrayOpen(!trayOpen);
   };
 
   // Opening More actions keeps the bar open and makes it Message options' bar, so Escape shuts More
@@ -343,34 +351,39 @@ export function MessageActionsMenu({ message, nodes, row, editable, threadPath, 
 
   const pinned = open && overlapping;
 
+  const options = (
+    <button
+      ref={trigger}
+      type="button"
+      aria-label="Message options"
+      aria-expanded={open}
+      aria-controls={rendered ? menuId : undefined}
+      onClick={toggle}
+      className={cn(
+        "flex size-8 cursor-pointer items-center justify-center rounded-[9px] text-[0.8rem] font-medium text-message-muted hover:bg-hover focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-foreground touch:size-11 [&_svg]:size-4",
+        // Campfire's messages.css: hidden until the message is hovered or holds focus, fading in after a
+        // moment with a mouse, and half shown for fingers.
+        "opacity-0 touch:opacity-50 group-hover/message:opacity-100! group-focus-within/message:opacity-100! aria-expanded:opacity-100!",
+        "[@media(hover:hover)_and_(pointer:fine)]:transition-opacity [@media(hover:hover)_and_(pointer:fine)]:delay-150 [@media(hover:hover)_and_(pointer:fine)]:duration-150 [@media(hover:hover)_and_(pointer:fine)]:ease-in-out",
+        // Message options: at the top right of the message's text, 6px further out for fingers, so 4px
+        // lower on a run's first message, whose text starts 4px lower in its row. With a mouse, the open bar
+        // keeps room for it as its last button, which stays shaded while More actions is open, as More
+        // reactions does while its tray is.
+        pinned
+          ? "fixed top-(--trigger-top) left-(--trigger-left) z-31"
+          : cn("absolute right-5 max-md:right-3 touch:translate-x-1.5", threaded ? "-top-1.5 touch:-top-[11px]" : "-top-0.5 touch:-top-[7px]"),
+        pinned && actionsOpen && "bg-hover",
+      )}
+    >
+      <MoreHoriz />
+    </button>
+  );
+
   return (
     <div ref={container} className="contents">
-      <button
-        ref={trigger}
-        type="button"
-        aria-label="Message options"
-        aria-expanded={open}
-        aria-controls={rendered ? menuId : undefined}
-        // As the bar's last button, it's named for what it opens, as the bar's other buttons are.
-        title={pinned ? "More actions" : undefined}
-        onClick={toggle}
-        className={cn(
-          "flex size-8 cursor-pointer items-center justify-center rounded-[9px] text-[0.8rem] font-medium text-message-muted hover:bg-hover focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-foreground touch:size-11 [&_svg]:size-4",
-          // Campfire's messages.css: hidden until the message is hovered or holds focus, fading in after a
-          // moment with a mouse, and half shown for fingers.
-          "opacity-0 touch:opacity-50 group-hover/message:opacity-100! group-focus-within/message:opacity-100! aria-expanded:opacity-100!",
-          "[@media(hover:hover)_and_(pointer:fine)]:transition-opacity [@media(hover:hover)_and_(pointer:fine)]:delay-150 [@media(hover:hover)_and_(pointer:fine)]:duration-150 [@media(hover:hover)_and_(pointer:fine)]:ease-in-out",
-          // Message options: at the top right of the message's text, 6px further out for fingers. With a
-          // mouse, the open bar keeps room for it as its last button, which stays shaded while More actions
-          // is open, as More reactions does while its tray is.
-          pinned
-            ? "fixed top-(--trigger-top) left-(--trigger-left) z-31"
-            : "absolute -top-1.5 right-5 max-md:right-3 touch:-top-[11px] touch:translate-x-1.5",
-          pinned && actionsOpen && "bg-hover",
-        )}
-      >
-        <MoreHoriz />
-      </button>
+      {/* Every message has Message options, so only a mouse, which can show its tooltip, gets one. As the bar's
+          last button, the tooltip says what it opens. */}
+      {overlapping ? <ActionTooltip label={pinned ? "More actions" : "Message options"}>{options}</ActionTooltip> : options}
       {rendered && (
         <div
           ref={menu}
@@ -395,42 +408,53 @@ export function MessageActionsMenu({ message, nodes, row, editable, threadPath, 
                 <Reaction key={emoji} emoji={emoji} title={title} onClick={() => react(emoji)} />
               ))}
             </div>
+            <ActionTooltip label="More reactions">
+              <button
+                ref={more}
+                type="button"
+                aria-label="More reactions"
+                aria-expanded={trayOpen}
+                aria-controls={trayId}
+                className={cn(ACTION, "aria-expanded:bg-hover")}
+                onClick={toggleTray}
+              >
+                <Emoji />
+              </button>
+            </ActionTooltip>
             {threadPath !== undefined && (
-              <PageLink href={threadPath} title="Reply in thread" aria-label="Reply in thread" className={ACTION} onClick={close}>
-                <MessageText />
-              </PageLink>
+              <ActionTooltip label="Reply in thread">
+                <PageLink href={threadPath} aria-label="Reply in thread" className={ACTION} onClick={close}>
+                  <MessageText />
+                </PageLink>
+              </ActionTooltip>
             )}
-            {/* More actions holds Quote with a mouse. */}
+            {/* More actions holds Quote and Copy link with a mouse. */}
             {message.attachment ? (
               <FileActions file={message.attachment} />
             ) : (
               !overlapping && (
-                <QuoteButton message={message} nodes={nodes} title="Quote" aria-label="Quote" className={ACTION} onQuote={quote}>
-                  <QuoteMessage />
-                </QuoteButton>
+                <ActionTooltip label="Quote">
+                  <QuoteButton message={message} nodes={nodes} aria-label="Quote" className={ACTION} onQuote={quote}>
+                    <QuoteMessage />
+                  </QuoteButton>
+                </ActionTooltip>
               )
             )}
-            <button type="button" title="Copy link" aria-label="Copy link" className={ACTION} onClick={(event) => void copyLink(event, message)}>
-              <Copy />
-            </button>
+            {!overlapping && (
+              <ActionTooltip label="Copy link">
+                <button type="button" aria-label="Copy link" className={ACTION} onClick={(event) => void copyLink(event, message)}>
+                  <Copy />
+                </button>
+              </ActionTooltip>
+            )}
             {/* As Campfire's `.message__edit-btn` shows (messages.css). */}
             {editable && (
-              <button type="button" title="Edit" aria-label="Edit" className={ACTION} onClick={edit}>
-                <Edit />
-              </button>
+              <ActionTooltip label="Edit">
+                <button type="button" aria-label="Edit" className={ACTION} onClick={edit}>
+                  <Edit />
+                </button>
+              </ActionTooltip>
             )}
-            <button
-              ref={more}
-              type="button"
-              title="More reactions"
-              aria-label="More reactions"
-              aria-expanded={trayOpen}
-              aria-controls={trayId}
-              className={cn(ACTION, "aria-expanded:bg-hover")}
-              onClick={toggleTray}
-            >
-              <Emoji />
-            </button>
           </div>
           <div
             ref={tray}
@@ -445,10 +469,12 @@ export function MessageActionsMenu({ message, nodes, row, editable, threadPath, 
               {REACTIONS.slice(QUICK_REACTION_COUNT).map(([emoji, title]) => (
                 <Reaction key={emoji} emoji={emoji} title={title} onClick={() => react(emoji)} />
               ))}
-              <button type="button" title="New boost" className={ACTION} onClick={newBoost}>
-                <ChatPlusIn />
-                <span className="sr-only">New boost</span>
-              </button>
+              <ActionTooltip label="New boost">
+                <button type="button" className={ACTION} onClick={newBoost}>
+                  <ChatPlusIn />
+                  <span className="sr-only">New boost</span>
+                </button>
+              </ActionTooltip>
             </div>
           </div>
           <div
@@ -498,15 +524,34 @@ export function MessageActionsMenu({ message, nodes, row, editable, threadPath, 
   );
 }
 
+/**
+ * Names one of the bar's buttons, or the tray's, in a tooltip the moment the pointer reaches it, where a
+ * `title` took a second or so. It shuts as the pointer leaves, so the pointer can't rest on it outside the
+ * message, which would shut the bar under it. Focus doesn't open it, as it didn't show a `title`, since an
+ * open tooltip takes the Escape that shuts the tray, More actions and the bar.
+ */
+function ActionTooltip({ label, children }: { label: string; children: ReactElement }) {
+  return (
+    <Tooltip disableHoverableContent>
+      <TooltipTrigger asChild onFocus={(event) => event.preventDefault()}>
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 /** One of the reactions: the emoji, named by its title. */
 function Reaction({ emoji, title, onClick }: { emoji: string; title: string; onClick: () => void }) {
   return (
-    <button type="button" title={title} className={ACTION} onClick={onClick}>
-      <span aria-hidden className="text-[1.3rem] leading-normal">
-        {emoji}
-      </span>
-      <span className="sr-only">{title}</span>
-    </button>
+    <ActionTooltip label={title}>
+      <button type="button" className={ACTION} onClick={onClick}>
+        <span aria-hidden className="text-[1.3rem] leading-normal">
+          {emoji}
+        </span>
+        <span className="sr-only">{title}</span>
+      </button>
+    </ActionTooltip>
   );
 }
 
@@ -518,19 +563,23 @@ function Reaction({ emoji, title, onClick }: { emoji: string; title: string; onC
 function FileActions({ file }: { file: StoredFile }) {
   return (
     <>
-      <a href={file.downloadUrl} title="Download" aria-label="Download" className={cn(ACTION, "ios-pwa:hidden")}>
-        <Download />
-      </a>
+      <ActionTooltip label="Download">
+        <a href={file.downloadUrl} aria-label="Download" className={cn(ACTION, "ios-pwa:hidden")}>
+          <Download />
+        </a>
+      </ActionTooltip>
       {canShare() && (
-        <ShareButton url={file.url} sharedTitle={file.name} title="Share" aria-label="Share" className={ACTION}>
-          <ShareAndroid />
-        </ShareButton>
+        <ActionTooltip label="Share">
+          <ShareButton url={file.url} sharedTitle={file.name} aria-label="Share" className={ACTION}>
+            <ShareAndroid />
+          </ShareButton>
+        </ActionTooltip>
       )}
     </>
   );
 }
 
-interface QuoteButtonProps extends Omit<ComponentProps<"button">, "onClick"> {
+interface QuoteButtonProps extends ComponentProps<"button"> {
   message: Message;
   nodes: DisplayNode[];
   onQuote: (quote: string) => void;
@@ -539,11 +588,13 @@ interface QuoteButtonProps extends Omit<ComponentProps<"button">, "onClick"> {
 /**
  * Quote, which writes a reply quoting the message in the composer. It reads the people directory only
  * while the bar's in the page, so a change to the directory doesn't render every message's actions again.
+ * As a tooltip's trigger, it's handed the tooltip's `onClick`, which a click calls first.
  */
-function QuoteButton({ message, nodes, onQuote, ...props }: QuoteButtonProps) {
+function QuoteButton({ message, nodes, onQuote, onClick, ...props }: QuoteButtonProps) {
   const people = useContext(PeopleContext);
   const nameOf = useNameOf();
-  const quote = () => {
+  const quote = (event: MouseEvent<HTMLButtonElement>) => {
+    onClick?.(event);
     const link = new URL(permalinkOf(message), document.baseURI).href;
     const mentioned = (userId: string) => mentionedPerson(people, message.mentions, userId)?.name ?? UNKNOWN_PERSON;
     onQuote(replyQuote(nodes, nameOf(message.creator), link, mentioned));

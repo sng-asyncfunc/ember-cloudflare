@@ -74,7 +74,8 @@ nothing for downloads.
 Point Alertmanager, Grafana, your CI pipeline, or anything else that posts to a Slack incoming webhook
 at Ember instead. Every bot gets a Slack-compatible webhook URL for each of its rooms, which takes the
 same payloads, with Slack's formatting, attachments and Block Kit cards. Bots can answer too: mention
-one, or DM it, and Ember sends the message to the bot's own webhook and posts its reply.
+one, or DM it, and Ember sends the message to the bot's own webhook and posts what it answers within
+30 seconds.
 
 ![Alerts from a monitoring bot, firing and resolved, in the Support room](docs/screenshots/bots.png)
 
@@ -83,14 +84,18 @@ one, or DM it, and Ember sends the message to the bot's own webhook and posts it
 Turn on Ember AI and choose a model, from Workers AI's free ones to Claude, GPT or Gemini, through
 [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/). Then mention @ember in a room
 or a thread, or DM it, and it reads the conversation and answers right there, with links, lists, code
-and pictures, as a teammate would. Administrators set how long it may think and write, and each person
-picks their own levels on their profile.
+and pictures, as a teammate would. On Claude or GPT it can search the web too, listing the pages its
+answer came from. Administrators set how long it may think and write, and each person picks their own
+levels on their profile.
 
 ### Find anything
 
-Search every message in the rooms and DMs you're in, thread replies included.
+Press ⌘F, or Ctrl+F, to search every message in the rooms and DMs you're in, thread replies included,
+and narrow it as you would in Slack: to a room, to what someone wrote, to what mentions you, or to
+links, files or threads. Results come newest or oldest first, with the words they matched marked, and
+your recent searches are a key away.
 
-![Search results for "thanks", from rooms, threads and a DM](docs/screenshots/search.png)
+![Search results for "thanks" under Slack's filter chips, each a card naming its DM or room, with the word marked](docs/screenshots/search.png)
 
 ### On your phone
 
@@ -140,7 +145,7 @@ it's yours. Slack's plans are as [slack.com/pricing](https://slack.com/pricing) 
 | **Mentions, quotes, reactions and edits** | ✅ react with any emoji or a few words | ✅ plus custom emoji |
 | **Rich text, code blocks and link previews** | ✅ | ✅ |
 | **Files** | ✅ up to 250 MB each | ✅ up to 1 GB each |
-| **Search** | ✅ every message in your rooms and DMs | ✅ (Free: the last 90 days) |
+| **Search** | ✅ every message in your rooms and DMs, with Slack's filters for rooms, people, links, files and threads | ✅ (Free: the last 90 days) |
 | **Unread, Activity, starred rooms, per-room notifications** | ✅ | ✅ |
 | **Phones** | ✅ installable web app with push notifications | ✅ native iPhone and Android apps |
 | **Computers** | ✅ any modern browser, or installed as an app | ✅ native Mac, Windows and Linux apps, or the browser |
@@ -196,16 +201,36 @@ was made.
 
 ### Deploy to Cloudflare
 
-1. Turn on R2 in your Cloudflare dashboard, for the files people share.
+1. Turn on R2 in your Cloudflare dashboard, for the files people share. Each Ember needs a bucket and a
+   database of its own, so if your account already runs an Ember, choose Create new when the form picks
+   that one's.
 2. Click **Deploy to Cloudflare** above. Cloudflare copies Ember to your GitHub or GitLab account, asks
-   you to name the Worker and its bucket, and deploys it. There are no secrets to fill in.
-3. Open the setup link at the end of the deploy's build log, `https://<your Worker>/first_run#token=…`,
-   and create your community and its administrator. Only that link opens setup, so nobody who finds
-   the address first can take it over.
-4. Invite your team with the join link on general's welcome card, or by email.
+   you to name the Worker, its bucket and its database, to choose where messages live, and to make up a
+   setup password, and deploys it. Keep `do-sqlite`, which scales furthest, unless you want every
+   message in one D1 database you can query and export, as
+   [Storage](docs/self-hosting.md#storage-durable-object-sqlite-or-d1) explains; either way, a team of
+   more than about 100 people a day needs Workers Paid. If Cloudflare first has you connect GitHub or
+   GitLab, it comes back to a page for deploying one of your own repositories instead: click the button
+   again, and Ember's form opens with your account connected.
+3. Open your Worker's address, `https://<your Worker>`, type the setup password, and create your
+   community and its administrator. Only that password opens setup, so nobody who finds the address
+   first can take it over. Forgot it? Give `EMBER_SETUP_PASSWORD` a new value in the Worker's
+   **Settings**, under **Variables and Secrets**.
+4. Add the Update Ember workflow to your copy, which Cloudflare leaves out with the rest of Ember's
+   `.github` folder: the build log says how, with a link to GitHub's editor with it filled in for you
+   to commit, or create `.github/workflows/update-ember.yml` in your copy with what
+   [Ember's](https://github.com/NYLLON-SOFTWARE/ember-cloudflare/blob/main/.github/workflows/update-ember.yml)
+   has.
+5. Trim the API token Cloudflare made for your copy's builds, `<your Worker> build token`, which may edit
+   nearly everything in your account, every R2 bucket included, though Ember's builds need little of
+   that: in **My Profile**, under **API Tokens**, choose **Edit** on it, not Roll, and remove every
+   permission but Workers Scripts, Account Settings, User Details and Memberships, and D1 if you chose
+   `d1`. [The build's token](docs/self-hosting.md#the-builds-token) says why.
+6. Invite your team with the join link on general's welcome card, or by email.
 
 From then on, every push to your copy deploys again, and each new release of Ember arrives in your copy
-as a pull request that deploys it once you merge it, while Ember's admin settings say it's out. The
+as a pull request that deploys it once you merge it, while Ember's admin settings say it's out, with a
+button that opens the workflow on GitHub to run it sooner. The
 [self-hosting guide](docs/self-hosting.md) covers updating, deploying from your own machine, a custom
 domain, email, push notifications, Memberful and more.
 

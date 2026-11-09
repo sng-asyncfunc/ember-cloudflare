@@ -2,7 +2,7 @@ import { isPasswordTooLong, isPasswordTooShort, parsePasswordReset } from "@embe
 import { jsonBodyOf } from "./bodies";
 import type { Env } from "./env";
 import { passwordHasher } from "./passwords";
-import { bearerTokenOf, isSecretToken, isToken } from "./secrets";
+import { bearerTokenOf, isSecretToken, isToken, secretOf } from "./secrets";
 import { workspace } from "./workspace";
 
 // Password recovery. A Worker has no shell beside its data, so it's an endpoint behind a secret of its
@@ -21,7 +21,7 @@ const problem = (status: number, message: string) => Response.json({ error: mess
  * Never while the secret is unset, or set to something that can't be a token.
  */
 export async function carriesRecoveryToken(request: Request, env: Env): Promise<boolean> {
-  const token = env.EMBER_RECOVERY_TOKEN;
+  const token = secretOf(env.EMBER_RECOVERY_TOKEN);
   if (token === undefined) return false;
   if (!isSecretToken(token)) {
     // Never the value, which may be most of a real token.

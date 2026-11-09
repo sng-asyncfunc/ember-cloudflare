@@ -1,7 +1,7 @@
-import { useContext, useId, useLayoutEffect, useRef, useState, type FormEvent, type Ref } from "react";
+import { useContext, useId, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { MAX_BOOST_LENGTH, type Boost, type Me, type Message } from "@ember/protocol";
 import { isAllEmoji } from "@ember/richtext/dom";
-import { Emoji, Minus } from "@/components/icons/iconoir";
+import { ArrowUp, Emoji, Minus, Xmark } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
 import { RefusedUnboosts, RoomConnection } from "@/hooks/use-room";
 import { useScrollIntoView } from "@/hooks/use-scroll-into-view";
@@ -12,10 +12,6 @@ import { AvatarLink, UserAvatar } from "./user-avatar";
 
 /** A custom reaction starts with something other than a space. */
 const CUSTOM_REACTION = String.raw`\S+.*`;
-
-/** The Custom reaction form's buttons, 44px for fingers. */
-const FORM_BUTTON =
-  "inline-flex min-h-10 cursor-pointer items-center justify-center gap-[0.5em] rounded-[9px] border px-3 py-2 text-[13px] font-medium touch:min-h-11";
 
 interface Props {
   message: Message;
@@ -69,9 +65,9 @@ export function MessageBoosts({ message, me, threaded, actions, customizing, cus
         // Under a grouped message's text and time, across both columns.
         "col-span-full flex w-full flex-wrap items-center gap-x-[0.4ch] text-message-ink",
         // Where Message options is 44px, the next message's rises 11px into this one, reaching 38px in from
-        // its edge, so reactions stop short of it. A grouped message's body already keeps 32px of that clear.
-        // The Custom reaction form's buttons sit higher than that, so it takes the row's whole width.
-        !customizing && (threaded ? "touch:pr-1.5" : "touch:pr-[38px]"),
+        // its edge, so reactions, and the Custom reaction form after them, stop short of it. A grouped
+        // message's body already keeps 32px of that clear.
+        threaded ? "touch:pr-1.5" : "touch:pr-[38px]",
       )}
     >
       <ul aria-label="Reactions" className="flex flex-wrap gap-x-[0.4ch] empty:hidden">
@@ -180,67 +176,78 @@ function BoostPill({ boost, hint, onDelete }: { boost: Boost; hint: string; onDe
 }
 
 /**
- * New boost's form: your avatar and "Custom reaction", a field for up to 16 characters that can't start
- * with a space, and Cancel and Add reaction. Escape cancels. It scrolls itself into view, as its
- * scroll-into-view controller does.
+ * New boost's form, a pill in Add a boost's place: your avatar and a field for up to 16 characters that
+ * can't start with a space, as wide as what's written, then Add reaction once something is, and an X that
+ * cancels, as Escape does. How many characters are left shows once five or fewer are. It scrolls itself
+ * into view, as its scroll-into-view controller does.
  */
 function CustomReaction({ me, fieldRef, onAdd, onCancel }: { me: Me; fieldRef?: Ref<HTMLInputElement>; onAdd: (content: string) => void; onCancel: () => void }) {
   const form = useRef<HTMLFormElement>(null);
-  const field = useId();
   const hint = useId();
+  const [content, setContent] = useState("");
+  const left = MAX_BOOST_LENGTH - content.length;
 
   useScrollIntoView(form);
 
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    onAdd(new FormData(event.currentTarget).get("content") as string);
-  };
-
   return (
-    <div className="mt-2.5 mb-1.5 w-[340px] max-w-full min-w-0 rounded-[12px] border bg-surface p-3.5">
-      <form
-        ref={form}
-        className="grid w-full min-w-0 gap-2.5"
-        onSubmit={submit}
-        onKeyDown={(event) => {
-          if (!pressedAlone(event.nativeEvent, "Escape")) return;
-          event.preventDefault();
-          onCancel();
-        }}
-      >
-        <div className="flex items-center gap-[9px]">
-          <UserAvatar user={me} className="size-7" />
-          <label htmlFor={field} className="text-[13px] font-semibold">
-            Custom reaction
-          </label>
-        </div>
+    <form
+      ref={form}
+      className="mt-1 flex h-8 max-w-full min-w-0 items-center gap-[0.4ch] rounded-[4rem] border bg-background pr-0.5 transition-shadow duration-150 focus-within:ring-2 focus-within:ring-selected-dark touch:h-11 touch:pr-0"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onAdd(content);
+      }}
+      onKeyDown={(event) => {
+        if (!pressedAlone(event.nativeEvent, "Escape")) return;
+        event.preventDefault();
+        onCancel();
+      }}
+    >
+      {/* Your avatar, and the pill's height round the field, take the field's taps too. */}
+      <label className="flex min-w-0 cursor-text items-center gap-[0.4ch] self-stretch pl-[0.2em] touch:-my-px touch:pl-1.5">
+        <UserAvatar user={me} className="size-[22px] touch:size-7" />
         <input
           ref={fieldRef}
-          id={field}
           name="content"
           type="text"
+          aria-label="Custom reaction"
+          aria-describedby={hint}
           autoFocus
           autoComplete="off"
           autoCorrect="off"
+          enterKeyHint="send"
           maxLength={MAX_BOOST_LENGTH}
           required
           pattern={CUSTOM_REACTION}
-          placeholder="Emoji or a short message"
-          aria-describedby={hint}
-          className="block min-h-[42px] w-full min-w-0 rounded-[8px] border bg-background px-[11px] py-[9px] text-foreground placeholder:text-muted-foreground focus:border-muted-foreground focus:shadow-[0_0_0_1px_var(--muted-foreground)] focus-visible:outline-none touch:text-base"
+          // The field is as wide as what's written, which its placeholder would keep it wider than.
+          placeholder={content === "" ? "Emoji or a word" : ""}
+          value={content}
+          onChange={(event) => setContent(event.currentTarget.value)}
+          className="block min-w-[5ch] field-sizing-content bg-transparent text-[0.8rem] text-foreground outline-none placeholder:text-muted-foreground touch:text-base"
         />
-        <p id={hint} className="-mt-[3px] mb-0.5 text-[12px] text-muted-foreground">
-          Up to 16 characters.
-        </p>
-        <div className="flex flex-wrap justify-end gap-2">
-          <button type="button" className={cn(FORM_BUTTON, "bg-background text-foreground")} onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="submit" className={cn(FORM_BUTTON, "border-transparent bg-foreground text-background hover:not-active:brightness-70")}>
-            Add reaction
-          </button>
-        </div>
-      </form>
-    </div>
+      </label>
+      <span id={hint} hidden>
+        Up to 16 characters.
+      </span>
+      {left <= 5 && (
+        <span className={cn("shrink-0 text-[11px] leading-none whitespace-nowrap text-muted-foreground tabular-nums", left === 0 && "text-negative")}>{left} left</span>
+      )}
+      {content.trim() !== "" && (
+        <button type="submit" className="group/add grid size-6 shrink-0 cursor-pointer place-items-center touch:size-11">
+          <span className="grid size-6 place-items-center rounded-full bg-foreground text-background group-hover/add:brightness-70 touch:size-7">
+            <ArrowUp className="size-3.5" />
+          </span>
+          <span className="sr-only">Add reaction</span>
+        </button>
+      )}
+      <button
+        type="button"
+        className="grid size-6 shrink-0 cursor-pointer place-items-center rounded-full text-muted-foreground hover:bg-hover hover:text-foreground touch:size-11"
+        onClick={onCancel}
+      >
+        <Xmark className="size-4" />
+        <span className="sr-only">Cancel</span>
+      </button>
+    </form>
   );
 }

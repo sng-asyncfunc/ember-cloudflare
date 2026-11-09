@@ -464,7 +464,7 @@ describe("@ember", () => {
 
     const question = await post(client, `<p>${mention(EMBER)} hello?</p>`);
     expect(await nextAnswer(client)).toMatchObject({ creator: EMBER, plainText: NOTES.credits });
-    expect(errors).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`^Ember AI's model didn't answer message ${question.id}: .*Insufficient credits`)));
+    expect(errors).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`^Ember AI's model ${MODEL.replaceAll(".", "\\.")} didn't answer message ${question.id}: .*Insufficient credits`)));
     client.close();
   });
 

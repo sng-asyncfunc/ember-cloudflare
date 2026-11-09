@@ -1,6 +1,7 @@
-import { createElement, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { createElement, useContext, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import type { DisplayElement } from "@ember/richtext/dom";
 import type { Token } from "@/lib/highlight";
+import { marked, SearchMarks } from "./search-marks";
 
 type Highlighter = typeof import("@/lib/highlight");
 
@@ -48,18 +49,22 @@ function codeOf(block: DisplayElement): string | null {
   return code;
 }
 
-const tokenNode = (token: Token): ReactNode =>
-  typeof token === "string" ? token : createElement("span", { className: token.className }, ...token.children.map(tokenNode));
+/** `token` as React draws it, with what `marks` matches in its text marked. */
+const tokenNode = (token: Token, marks: RegExp | null): ReactNode =>
+  typeof token === "string"
+    ? marked(token, marks)
+    : createElement("span", { className: token.className }, ...token.children.map((child) => tokenNode(child, marks)));
 
 /**
  * A message's code block, highlighted once highlight.js has loaded, as Campfire's `MessageFormatter`
  * highlights one (app/javascript/models/message_formatter.js): only when it holds nothing but text, so
- * not when an address in it is linked.
+ * not when an address in it is linked. What a search's results mark in it stays marked.
  */
 export function CodeBlock({ block, children, ...props }: ComponentProps<"pre"> & { block: DisplayElement }) {
   const code = codeOf(block);
   const language = block.attrs["data-language"];
   const highlighter = useHighlighter(code !== null);
+  const marks = useContext(SearchMarks);
   const tokens = useMemo(() => (highlighter && code !== null ? highlighter.highlight(code, language) : null), [highlighter, code, language]);
-  return createElement("pre", props, ...(tokens ? tokens.map(tokenNode) : [children]));
+  return createElement("pre", props, ...(tokens ? tokens.map((token) => tokenNode(token, marks)) : [children]));
 }

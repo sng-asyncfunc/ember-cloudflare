@@ -8,6 +8,7 @@ import { leave, PROFILE_PATH, useBackPath } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
 import { banPerson, fetchPerson, isSignedOut, unbanPerson } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { AgentBadge, isAssistant } from "./agent-badge";
 import { HEADER_BUTTON } from "./page-header";
 import { isMissing } from "./room-settings-page";
 import { Panel, SettingsPage } from "./settings-page";
@@ -45,11 +46,12 @@ const DIRECT_BUTTON =
  * page it was opened from, a pencil to Edit my profile on your own, and their avatar. Active and banned
  * people show their name and bio, with their email address for administrators, and active people a
  * button that starts a DM with them, or opens the one you have. Removed people show their name and that
- * they're no longer on this account, and bots only their avatar, then the DM button while they're
- * active. Administrators get a new sign-in link for anyone active who isn't a bot, themselves included,
- * and Ban for anyone else active or Remove ban for anyone banned. The people directory keeps what it
- * lists of them current. Members suspended for their Memberful membership's lapsing show as removed
- * people do, but to administrators, who see them as banned people, with why they can't sign in, and Ban.
+ * they're no longer on this account, and bots only their avatar, with the agent badge under @ember's,
+ * then the DM button while they're active. Administrators get a new sign-in link for anyone active who
+ * isn't a bot, themselves included, and Ban for anyone else active or Remove ban for anyone banned. The
+ * people directory keeps what it lists of them current. Members suspended for their Memberful
+ * membership's lapsing show as removed people do, but to administrators, who see them as banned people,
+ * with why they can't sign in, and Ban.
  */
 export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadPeople, onMissing, onFailed }: Props) {
   const [fetched, setFetched] = useState<PersonAnswer | null>(null);
@@ -137,6 +139,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
         {person && (
           <div className="flex flex-col gap-x-[1ch] gap-y-4 wrap-anywhere">
             <Avatar person={person} />
+            {isAssistant(person) && <AgentBadge className="mx-auto" />}
             {person.role === "bot" ? (
               person.status === "active" ? (
                 // At the page's text size.

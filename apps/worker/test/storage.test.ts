@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { openDb, statement } from "../src/db";
 import type { Env } from "../src/env";
 import { MIGRATIONS, migrate, SEARCH_MIGRATIONS, type Scope } from "../src/migrations";
-import { apiWith, connect, freshRoom, objectSql, post, roomSql, roomStub, searchIndexStub, workspaceStub } from "./support";
+import { apiWith, connect, freshRoom, objectSql, post, roomSql, roomStub, searchIndexStub, sharedD1, workspaceStub } from "./support";
 
 /** The tables each kind of object keeps. A migration's new tables go under the scope it names. */
 const TABLES: Record<Exclude<Scope, "search">, string[]> = {
@@ -28,6 +28,7 @@ const TABLES: Record<Exclude<Scope, "search">, string[]> = {
     "pending_reindexes",
     "pending_revocations",
     "push_subscriptions",
+    "recent_searches",
     "rooms",
     "searches",
     "sessions",
@@ -44,6 +45,7 @@ const SEARCH_TABLES = [
   "search_index_data",
   "search_index_docsize",
   "search_index_idx",
+  "search_mentions",
   "search_messages",
   "search_rooms",
 ];
@@ -61,7 +63,7 @@ describe("Durable Object SQLite or D1", () => {
     const token = "ab".repeat(32);
     const health = await apiWith({ EMBER_RECOVERY_TOKEN: token }, "/api/health", { headers: { Authorization: `Bearer ${token}` } });
     const { storage } = (await health.json()) as { storage: string };
-    const db = (env as { DB?: D1Database }).DB;
+    const db = sharedD1();
     expect(storage).toBe(db ? "d1" : "do-sqlite");
     if (!db) return;
 
@@ -85,7 +87,7 @@ describe("Durable Object SQLite or D1", () => {
   it("gives each kind of object only its own tables, and D1 every kind's", async () => {
     const names = (tables: string[]) => tables.map((name) => ({ name }));
     expect(await objectSql(searchIndexStub(), MIGRATED_TABLES)).toEqual(names(SEARCH_TABLES));
-    const db = (env as { DB?: D1Database }).DB;
+    const db = sharedD1();
     if (db) {
       expect((await db.prepare(MIGRATED_TABLES).all()).results).toEqual(names(Object.values(TABLES).flat().sort()));
       return;
@@ -99,7 +101,7 @@ describe("Durable Object SQLite or D1", () => {
   it("applies each migration once: all of them to D1, and each object's own to its storage", async () => {
     const room = await freshRoom("migrated");
     await connect(room, "Ada");
-    const db = (env as { DB?: D1Database }).DB;
+    const db = sharedD1();
     const recorded = (db ? MIGRATIONS : roomMigrations).map(({ name }) => ({ name }));
     expect(await roomSql(room, "SELECT name FROM d1_migrations ORDER BY id")).toEqual(recorded);
     expect(await objectSql(searchIndexStub(), "SELECT name FROM d1_migrations ORDER BY id")).toEqual(SEARCH_MIGRATIONS.map(({ name }) => ({ name })));
@@ -112,7 +114,7 @@ describe("Durable Object SQLite or D1", () => {
   });
 
   it("records the first migration in rooms that ran it before migrations were tracked", async () => {
-    if ((env as { DB?: D1Database }).DB) return;
+    if (sharedD1()) return;
     const room = await freshRoom("untracked");
     const messages = await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => {
       // What every room did on opening before migrate() existed.
@@ -130,7 +132,7 @@ describe("Durable Object SQLite or D1", () => {
 
   it("stores the plain text messages had before rich text as the paragraph Lexxy sends for it, as the room would store that now", async () => {
     // D1 runs the same SQL, at setup, with no messages from before to convert.
-    if ((env as { DB?: D1Database }).DB) return;
+    if (sharedD1()) return;
     const room = await freshRoom("plain-text-before");
     const texts = ["Hello", "Fish & chips <3 >_< &amp;", "Two\nlines\n\nand a gap", "Windows\r\nline", "Old Mac\rline", "No\u00a0break", "Tab\tand  spaces", "😄🤘"];
     const rows = await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => {
@@ -168,7 +170,7 @@ describe("Durable Object SQLite or D1", () => {
 
   it("keeps the push subscriptions saved before they were numbered with AUTOINCREMENT, and never numbers another as one deleted", async () => {
     // D1 runs the same SQL, at setup, with no subscriptions from before to keep.
-    if ((env as { DB?: D1Database }).DB) return;
+    if (sharedD1()) return;
     // A new room's storage stands in for a Workspace's from before, since a Workspace migrates as it opens.
     const room = await freshRoom("push-subscriptions-before");
     const rows = await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => {
@@ -201,7 +203,7 @@ describe("Durable Object SQLite or D1", () => {
 
   it("keeps the push subscription saved most recently at each endpoint, then each person's ten saved most recently, from before a person had each endpoint once", async () => {
     // D1 runs the same SQL, at setup, with no subscriptions from before to keep.
-    if ((env as { DB?: D1Database }).DB) return;
+    if (sharedD1()) return;
     // A new room's storage stands in for a Workspace's from before, since a Workspace migrates as it opens.
     const room = await freshRoom("push-subscriptions-per-browser");
     const { rows, again } = await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => {

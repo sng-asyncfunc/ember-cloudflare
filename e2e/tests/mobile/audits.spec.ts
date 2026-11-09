@@ -74,6 +74,22 @@ test("a field all of which shows, in a label partly scrolled out of view, fails 
   expect(touchTargets).toEqual([expect.stringMatching(/^<input> "Small" is .* partly scrolled out of view/)]);
 });
 
+test("a control scrolled a pixel out of view counts as all shown, crowded only by one that overlaps it", async ({ page, safeArea }) => {
+  // Each list stacks two 44px buttons, as a phone stacks the Message options of one person's messages,
+  // and is scrolled a pixel past the first one's top. Only in the second list do the buttons overlap.
+  const list = (label: string, overlap: number) => `
+    <div class="list" style="height: 200px; overflow-y: auto">
+      <div style="height: 100px"></div>
+      <button aria-label="${label}" style="display: block; margin: 0; width: 44px; height: 44px"></button>
+      <button aria-label="Under ${label}" style="display: block; margin: -${overlap}px 0 0; width: 44px; height: 44px"></button>
+      <div style="height: 200px"></div>
+    </div>`;
+  await page.setContent(phonePage(`${list("Touching", 0)}${list("Overlapped", 2)}`));
+  await page.evaluate(() => document.querySelectorAll(".list").forEach((list) => (list.scrollTop = 101)));
+  const { touchTargets } = await auditScreen(page, safeArea);
+  expect(touchTargets).toEqual([expect.stringContaining('<button> "Overlapped" is 44px×44px; a 44px fingertip on it can land on <button> "Under Overlapped"')]);
+});
+
 test("a control covered for good by something floating over its list fails, but not one the list can scroll clear", async ({ page, safeArea }) => {
   // The last button in each list sits under a floating notice; only the second list has room to
   // scroll it out from under.

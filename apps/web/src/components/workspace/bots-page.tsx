@@ -1,11 +1,9 @@
 import { useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { botMessagesPath, botSlackPath, type Bot, type BotRoom } from "@ember/protocol/bots";
-import { PRIMARY_BUTTON } from "@/components/field";
 import { useFlash } from "@/components/flash";
 import { Attachment, ChatBubbleEmpty, EditPencil, Internet, Plus } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { TranslationButton } from "@/components/translation-button";
-import { Button } from "@/components/ui/button";
 import { PeopleContext, type People } from "@/hooks/use-directory";
 import { botSettingsPath, navigate, NEW_BOT_PATH, WORKSPACE_SETTINGS_PATH } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
@@ -13,7 +11,7 @@ import { ApiError, fetchBots, isSignedOut } from "@/lib/api";
 import { byName } from "@/lib/people";
 import { cn } from "@/lib/utils";
 import { CopyButton, ROUND_BUTTON } from "./link-buttons";
-import { Panel, SettingsPage } from "./settings-page";
+import { Panel, SECTION_HEADING, SettingsPage, TITLE, TITLE_LINK } from "./settings-page";
 import { AvatarLink } from "./user-avatar";
 
 /** The command the bots page gives for posting a message as a bot to `url`. */
@@ -43,10 +41,10 @@ export function useAdministratorsOnly(onFailed: (error: unknown) => void) {
 }
 
 /**
- * The Chat bots page: Add a chat bot, then each active bot by name, with a link to its settings and, for
- * each room it's in, the commands that post to the room as it, which their buttons copy. Go Back returns
- * to workspace settings. A bot deleted or renamed elsewhere leaves or is renamed here as soon as the
- * people directory hears of it.
+ * The Chat bots page: what bots do, in short, and Add a chat bot, then each active bot by name, with a
+ * link to its settings and, for each room it's in, the commands that post to the room as it, which their
+ * buttons copy. Go Back returns to workspace settings. A bot deleted or renamed elsewhere leaves or is
+ * renamed here as soon as the people directory hears of it.
  */
 export function BotsPage({ onFailed }: { onFailed: (error: unknown) => void }) {
   const [bots, setBots] = useState<Bot[] | null>(null);
@@ -68,30 +66,40 @@ export function BotsPage({ onFailed }: { onFailed: (error: unknown) => void }) {
 
   return (
     <SettingsPage back={WORKSPACE_SETTINGS_PATH}>
-      {/* `.panel--wide`: 900px. */}
-      <Panel aria-busy={bots === null} className="w-[900px]">
-        <header className="mb-6">
-          {/* The globe sits beside the heading, rather than at the panel's corner over the heading's start. */}
-          <div className="mb-1.5 flex items-center gap-2">
-            <h1 className="text-[23px] leading-[1.3] font-[650]">Chat bots</h1>
+      {/* `.panel--wide`: 900px. Spaced as workspace settings' sections are. */}
+      <Panel aria-busy={bots === null} className="flex w-[900px] flex-col gap-6">
+        {/*
+          Add a chat bot ends the heading's row, as New room does in Rooms and permissions, with the
+          explainer under both in lines short enough to read. On phones it follows the explainer, rather
+          than wrapping in between them.
+        */}
+        <header className={cn(SECTION_HEADING, "grid grid-cols-[1fr_auto] items-center gap-x-3 upto-500px:grid-cols-1")}>
+          {/* The globe sits beside the heading. */}
+          <div className="flex items-center gap-2">
+            <h1 className={TITLE}>Chat bots</h1>
             <TranslationButton translations="chat_bots" />
           </div>
-          <p className="text-muted-foreground">With Chat bots, other sites and services can post updates directly to Ember.</p>
-          <Button asChild className={PRIMARY_BUTTON}>
-            <PageLink href={NEW_BOT_PATH} aria-label="Add a chat bot">
-              <Plus className="h-5 w-[1.3em]" />
-              <span>Add a chat bot</span>
-            </PageLink>
-          </Button>
+          <p className="col-span-full mt-1.5 max-w-prose text-muted-foreground">
+            Chat bots let other apps and services post in your rooms, and reply when people talk to them.
+            Each of a bot's rooms gets two addresses below, one for posting text or a file and one that takes a Slack incoming webhook's payload.
+            Give a bot a webhook URL, and Ember sends it every message that @mentions it or is sent to it in a DM, then posts whatever it answers within 30 seconds.
+          </p>
+          <PageLink
+            href={NEW_BOT_PATH}
+            aria-label="Add a chat bot"
+            className={cn(TITLE_LINK, "col-start-2 row-start-1 upto-500px:col-start-auto upto-500px:row-start-auto upto-500px:mt-4 upto-500px:justify-self-start")}
+          >
+            <Plus className="size-[18px]" />
+            <span>Add a chat bot</span>
+          </PageLink>
         </header>
-        <div className="px-[1ch] pt-4">
-          <menu className="m-0 flex flex-col gap-4 px-[1ch] py-4">
-            {bots &&
-              listedNow(bots, people).map((bot) => (
-                <BotItem key={bot.id} bot={bot} />
-              ))}
-          </menu>
-        </div>
+        {/* As wide as the heading, as the cards in workspace settings are. */}
+        <menu className="flex flex-col gap-4">
+          {bots &&
+            listedNow(bots, people).map((bot) => (
+              <BotItem key={bot.id} bot={bot} />
+            ))}
+        </menu>
       </Panel>
     </SettingsPage>
   );
@@ -129,12 +137,21 @@ function BotItem({ bot }: { bot: Bot }) {
  * fieldset with the room's name on its border.
  */
 function RoomCommands({ room, botKey }: { room: BotRoom; botKey: string }) {
-  const url = new URL(botMessagesPath(room.id, botKey), location.origin).href;
   return (
     <fieldset className="flex min-w-0 flex-col gap-x-[1ch] gap-y-4 rounded-[10px] border border-muted-foreground px-[1ch] py-4">
       <legend className="mx-auto flex max-w-full min-w-0 justify-center px-[1ch] text-start">
         <strong className="truncate">{room.name}</strong>
       </legend>
+      <PostingCommands room={room} botKey={botKey} />
+    </fieldset>
+  );
+}
+
+/** The commands that post to `room` as the bot whose key is `botKey`, and its Slack-compatible webhook, each with a button that copies it. */
+export function PostingCommands({ room, botKey }: { room: BotRoom; botKey: string }) {
+  const url = new URL(botMessagesPath(room.id, botKey), location.origin).href;
+  return (
+    <>
       <Command
         icon={<ChatBubbleEmpty className="size-6 flex-none" />}
         command={curlTextLine(url)}
@@ -153,7 +170,7 @@ function RoomCommands({ room, botKey }: { room: BotRoom; botKey: string }) {
         label="Slack-compatible webhook URL"
         copyLabel="Copy Slack-compatible webhook URL"
       />
-    </fieldset>
+    </>
   );
 }
 
@@ -162,7 +179,8 @@ function Command({ icon, command, label, copyLabel }: { icon: ReactNode; command
     <div className="flex items-center gap-x-[1ch]">
       {icon}
       <div className="min-w-0 grow">
-        <input type="text" value={command} aria-label={label} readOnly className={INPUT} />
+        {/* A command is there to be copied, so Enter in one doesn't send a form around it, as the bot form is. */}
+        <input type="text" value={command} aria-label={label} readOnly onKeyDown={(event) => event.key === "Enter" && event.preventDefault()} className={INPUT} />
       </div>
       {/* `.txt-small`, which draws the icon smaller. */}
       <div className="text-[0.8rem]">

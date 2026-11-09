@@ -243,13 +243,20 @@ describe("Reset a password from the server", () => {
     await setUp();
     await joinAsGrace();
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
-    for (const secret of ["", "not a token", TOKEN.toUpperCase(), `${TOKEN}\n`]) {
+    for (const secret of ["", "not a token", TOKEN.toUpperCase(), `${TOKEN} ${TOKEN}`]) {
       const response = await recover({ emailAddress: grace.emailAddress, password: "new password" }, { token: secret, secret });
       expect(response.status, JSON.stringify(secret)).toBe(404);
     }
     expect(logged).toHaveBeenCalledWith(expect.stringContaining("EMBER_RECOVERY_TOKEN must be 64 lowercase hex characters"));
     expect(JSON.stringify(logged.mock.calls)).not.toMatch(/not a token|0123456789ABCDEF/);
     expect((await signInWith(grace.emailAddress, grace.password)).status).toBe(201);
+  });
+
+  it("ignores the spaces and line breaks around EMBER_RECOVERY_TOKEN that pasting it can bring along", async () => {
+    await setUp();
+    await joinAsGrace();
+    expect((await recover({ emailAddress: grace.emailAddress, password: "new password" }, { secret: ` ${TOKEN}\n` })).status).toBe(200);
+    expect((await signInWith(grace.emailAddress, "new password")).status).toBe(201);
   });
 
   it("turns away a sign-in that checked the old password before the reset", async () => {

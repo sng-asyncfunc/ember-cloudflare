@@ -1,8 +1,9 @@
 import { EMBER_REPOSITORY, type NewWorkspace, type ReleaseCheck } from "@ember/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ANSWER_KEPT_MS, forgetNewestRelease, NO_ANSWER_KEPT_MS } from "../src/releases";
+import { AFRESH_AFTER_MS, ANSWER_KEPT_MS, forgetNewestRelease, NO_ANSWER_KEPT_MS } from "../src/releases";
 import { releaseNameOf, VERSION } from "../src/version";
-import { api, cookieOf, freshDeploy, shown, signIn, type Session } from "./support";
+import type { Env } from "../src/env";
+import { api, apiWith, cookieOf, freshDeploy, shown, signIn, type Session } from "./support";
 
 const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 
@@ -17,11 +18,14 @@ const as = (session?: Session | null): Record<string, string> => (session ? { Co
 
 /** Asks, as `session`, for the release this Ember is and the newest, as General settings does. */
 const checkRelease = (session: Session | null) => api("/api/account/release", { headers: as(session) });
+/** And afresh, as opening Admin does. */
+const checkReleaseAfresh = (session: Session | null) => api("/api/account/release_checks", { method: "POST", headers: as(session) });
 
-/** What `session` hears of releases, which has to answer. */
-async function releaseCheckFor(session: Session): Promise<ReleaseCheck> {
-  const response = await checkRelease(session);
+/** What `session` hears of releases, which has to answer, asked as `check` asks. */
+async function releaseCheckFor(session: Session, check = checkRelease): Promise<ReleaseCheck> {
+  const response = await check(session);
   expect(response.status, await response.clone().text()).toBe(200);
+  expect(response.headers.get("Cache-Control")).toBe("no-store");
   return response.json();
 }
 
@@ -70,7 +74,7 @@ describe("Checking for a newer release", () => {
     const response = await checkRelease(administrator);
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
-    expect(await response.json()).toEqual({ release: releaseNameOf(VERSION), newest: { release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true } });
+    expect(await response.json()).toEqual({ release: releaseNameOf(VERSION), newest: { release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true }, copy: null });
     expect(asked).toEqual([{ url: LATEST, redirect: "manual", userAgent: `Ember/${VERSION} (+${EMBER_REPOSITORY})` }]);
   });
 
@@ -82,7 +86,7 @@ describe("Checking for a newer release", () => {
     ] as const) {
       forgetNewestRelease();
       latestIs(version);
-      expect(await releaseCheckFor(administrator)).toEqual({ release: releaseNameOf(VERSION), newest: { release: name, notes: pageOf(version), newer: false } });
+      expect(await releaseCheckFor(administrator)).toEqual({ release: releaseNameOf(VERSION), newest: { release: name, notes: pageOf(version), newer: false }, copy: null });
     }
   });
 
@@ -123,7 +127,7 @@ describe("Checking for a newer release", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => failure());
     for (failure of failures) {
       forgetNewestRelease();
-      expect(await releaseCheckFor(administrator)).toEqual({ release: releaseNameOf(VERSION), newest: null });
+      expect(await releaseCheckFor(administrator)).toEqual({ release: releaseNameOf(VERSION), newest: null, copy: null });
     }
     expect(logged.mock.calls).toEqual([
       ["GitHub didn't name Ember's newest release: GitHub answered 200"],
@@ -185,14 +189,124 @@ describe("Checking for a newer release", () => {
     expect(asked).toHaveLength(2);
   });
 
-  it("answers only administrators, asking GitHub nothing for anyone else", async () => {
-    await setUp();
+  it("answers only administrators, asking GitHub nothing for anyone else, or for another site", async () => {
+    const administrator = await setUp();
     const asked = latestIs(NEXT);
-    expect((await checkRelease(null)).status).toBe(401);
     const member = await signIn("Grace");
-    const refused = await checkRelease(member);
-    expect(refused.status).toBe(403);
-    expect(await refused.json()).toEqual({ error: "Only administrators can change the workspace" });
+    for (const check of [checkRelease, checkReleaseAfresh]) {
+      expect((await check(null)).status).toBe(401);
+      const refused = await check(member);
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toEqual({ error: "Only administrators can change the workspace" });
+    }
+    const forged = await api("/api/account/release_checks", { method: "POST", headers: { ...as(administrator), "Sec-Fetch-Site": "cross-site" } });
+    expect(forged.status).toBe(422);
     expect(asked).toEqual([]);
+  });
+});
+
+describe("Checking afresh, as opening Admin does", () => {
+  it("asks GitHub again, once a minute has passed since it last asked, and keeps what it hears for six hours", async () => {
+    const administrator = await setUp();
+    let latest = VERSION;
+    const asked = fakeGitHub(() => redirectTo(pageOf(latest)));
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"], now: start });
+    const newest = { release: releaseNameOf(VERSION), notes: pageOf(VERSION), newer: false };
+    expect((await releaseCheckFor(administrator)).newest).toEqual(newest);
+    // GitHub publishes a newer release, which an ordinary check doesn't hear of for six hours.
+    latest = NEXT;
+    vi.setSystemTime(start + AFRESH_AFTER_MS - 1);
+    expect((await releaseCheckFor(administrator)).newest).toEqual(newest);
+    expect((await releaseCheckFor(administrator, checkReleaseAfresh)).newest).toEqual(newest);
+    expect(asked).toHaveLength(1);
+
+    vi.setSystemTime(start + AFRESH_AFTER_MS);
+    const next = { release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true };
+    expect(await releaseCheckFor(administrator, checkReleaseAfresh)).toEqual({ release: releaseNameOf(VERSION), newest: next, copy: null });
+    expect(asked.map(({ url }) => url)).toEqual([LATEST, LATEST]);
+    // Ordinary checks say so too, for six hours from then, and another made afresh within the minute asks nothing.
+    expect((await releaseCheckFor(administrator)).newest).toEqual(next);
+    vi.setSystemTime(start + 2 * AFRESH_AFTER_MS - 1);
+    expect((await releaseCheckFor(administrator, checkReleaseAfresh)).newest).toEqual(next);
+    vi.setSystemTime(start + AFRESH_AFTER_MS + ANSWER_KEPT_MS - 1);
+    expect((await releaseCheckFor(administrator)).newest).toEqual(next);
+    expect(asked).toHaveLength(2);
+    vi.setSystemTime(start + AFRESH_AFTER_MS + ANSWER_KEPT_MS);
+    expect((await releaseCheckFor(administrator)).newest).toEqual(next);
+    expect(asked).toHaveLength(3);
+  });
+
+  it("asks GitHub for a check made afresh where it hasn't asked yet, as a new isolate hasn't", async () => {
+    const administrator = await setUp();
+    const asked = latestIs(NEXT);
+    expect((await releaseCheckFor(administrator, checkReleaseAfresh)).newest).toEqual({ release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true });
+    expect(asked).toHaveLength(1);
+  });
+
+  it("keeps the release GitHub named when a check made afresh hears none, asking again only after another minute", async () => {
+    const administrator = await setUp();
+    const logged = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let answer = () => redirectTo(pageOf(NEXT));
+    const asked = fakeGitHub(() => answer());
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"], now: start });
+    const next = { release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true };
+    expect((await releaseCheckFor(administrator)).newest).toEqual(next);
+
+    answer = () => new Response("Unavailable", { status: 503 });
+    vi.setSystemTime(start + AFRESH_AFTER_MS);
+    expect((await releaseCheckFor(administrator, checkReleaseAfresh)).newest).toEqual(next);
+    expect(logged.mock.calls).toEqual([["GitHub didn't name Ember's newest release: GitHub answered 503"]]);
+    vi.setSystemTime(start + 2 * AFRESH_AFTER_MS - 1);
+    expect((await releaseCheckFor(administrator, checkReleaseAfresh)).newest).toEqual(next);
+    expect((await releaseCheckFor(administrator)).newest).toEqual(next);
+    expect(asked).toHaveLength(2);
+    vi.setSystemTime(start + 2 * AFRESH_AFTER_MS);
+    expect((await releaseCheckFor(administrator, checkReleaseAfresh)).newest).toEqual(next);
+    expect(asked).toHaveLength(3);
+  });
+});
+
+describe("The copy of Ember on GitHub", () => {
+  /** What the release check says of the copy, asked as `path` asks, of a Worker deployed with `vars`. */
+  async function copyWith(session: Session, vars: Partial<Env>, path = "/api/account/release") {
+    const response = await apiWith(vars, path, { method: path.endsWith("checks") ? "POST" : "GET", headers: as(session) });
+    expect(response.status, await response.clone().text()).toBe(200);
+    return ((await response.json()) as ReleaseCheck).copy;
+  }
+
+  it("names the copy the deploy told the Worker of, with the branch that deploys and whether it has the Update Ember workflow", async () => {
+    const administrator = await setUp();
+    latestIs(NEXT);
+    for (const path of ["/api/account/release", "/api/account/release_checks"]) {
+      expect(await copyWith(administrator, { GITHUB_REPOSITORY: "someone/my-ember", GIT_BRANCH: "main", UPDATE_WORKFLOW: "true" }, path)).toEqual({
+        repository: "someone/my-ember",
+        branch: "main",
+        workflow: true,
+      });
+    }
+    expect(await copyWith(administrator, { GITHUB_REPOSITORY: " Some-One/my.ember_2 ", GIT_BRANCH: "release/v1#stable", UPDATE_WORKFLOW: "false" })).toEqual({
+      repository: "Some-One/my.ember_2",
+      branch: "release/v1#stable",
+      workflow: false,
+    });
+    expect(await copyWith(administrator, { GITHUB_REPOSITORY: "someone/my-ember", GIT_BRANCH: "main" })).toEqual({ repository: "someone/my-ember", branch: "main", workflow: false });
+  });
+
+  it.each<Partial<Env>>([
+    {},
+    { GITHUB_REPOSITORY: "someone/my-ember" },
+    { GITHUB_REPOSITORY: "someone/my-ember", GIT_BRANCH: " ", UPDATE_WORKFLOW: "true" },
+    { GITHUB_REPOSITORY: "", GIT_BRANCH: "main" },
+    { GITHUB_REPOSITORY: "someone", GIT_BRANCH: "main" },
+    { GITHUB_REPOSITORY: "someone/my-ember/actions", GIT_BRANCH: "main" },
+    { GITHUB_REPOSITORY: "https://github.com/someone/my-ember", GIT_BRANCH: "main" },
+    { GITHUB_REPOSITORY: "some one/my-ember", GIT_BRANCH: "main" },
+    { GITHUB_REPOSITORY: "../my-ember", GIT_BRANCH: "main" },
+  ])("names none where the deploy told the Worker of none, or of what isn't a repository and a branch (%j)", async (vars) => {
+    const administrator = await setUp();
+    latestIs(NEXT);
+    expect(await copyWith(administrator, vars)).toBeNull();
   });
 });

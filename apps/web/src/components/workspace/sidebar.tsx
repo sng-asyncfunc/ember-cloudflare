@@ -10,6 +10,7 @@ import { useStarOrder } from "@/hooks/use-star-order";
 import { membersShown } from "@/lib/directs";
 import { apart, inDirectOrder, inSidebarOrder, markedUnread, suggestedPeople, type DirectSidebarRoom } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
+import { AgentBadge, isAssistant, isWithAssistant } from "./agent-badge";
 import { opensNewDirect } from "./new-direct-dialog";
 import { UserAvatar } from "./user-avatar";
 
@@ -216,7 +217,7 @@ interface DirectRowProps {
 
 /**
  * A DM's row: the avatar of the one other person in it, or of up to four in a group, at 24px or 14px
- * each, then their names, or yours in a DM with yourself.
+ * each, then their names, or yours in a DM with yourself, and the agent badge in a DM with @ember alone.
  */
 function DirectRow({ room, meId, current, unreadId, onClick }: DirectRowProps) {
   const nameOf = useNameOf();
@@ -242,6 +243,7 @@ function DirectRow({ room, meId, current, unreadId, onClick }: DirectRowProps) {
       {/* The space after the hidden words starts the visible line, where it doesn't show. */}
       <span className="min-w-0 flex-1 truncate">
         <span className="sr-only">Direct message with</span> {members.map((member) => `${nameOf(member)}${member.id === meId ? " (you)" : ""}`).join(", ")}
+        {isWithAssistant(room) && <AgentBadge className="ms-0.5" />}
       </span>
       {unreadId && <span aria-hidden="true" className="size-[7px] shrink-0 rounded-full bg-foreground" />}
     </a>
@@ -256,8 +258,8 @@ interface SuggestionRowProps {
 }
 
 /**
- * Someone suggested for a DM: a button in a DM row's style with their avatar and name, which starts the
- * DM with them.
+ * Someone suggested for a DM: a button in a DM row's style with their avatar and name, and the agent
+ * badge for @ember, which starts the DM with them.
  */
 function SuggestionRow({ person, starting, onClick }: SuggestionRowProps) {
   const nameOf = useNameOf();
@@ -267,6 +269,7 @@ function SuggestionRow({ person, starting, onClick }: SuggestionRowProps) {
       {/* The space after the hidden words starts the visible line, where it doesn't show. */}
       <span className="min-w-0 flex-1 truncate">
         <span className="sr-only">Start a direct message with</span> {nameOf(person)}
+        {isAssistant(person) && <AgentBadge className="ms-0.5" />}
       </span>
     </button>
   );
