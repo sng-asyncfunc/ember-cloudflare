@@ -1,16 +1,18 @@
-import { useId, useMemo, useState } from "react";
-import type { Card, CardButton, CardColumn, CardContextItem, CardField, CardImage, CardPart, CardTile } from "@ember/protocol";
+import { createContext, useContext, useId, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import type { Card, CardAction, CardButton, CardColumn, CardContextItem, CardField, CardImage, CardPart, CardTile } from "@ember/protocol";
 import { cardAddress, displayBody, type DisplayElement, type DisplayNode } from "@ember/richtext/dom";
 import { Button } from "@/components/ui/button";
 import { dateTimeLabel } from "@/lib/messages";
 import { cn } from "@/lib/utils";
 import { MessageBody, MessageLink, RemoteImage } from "./message-body";
+import { Marked } from "./search-marks";
 
 // A bot's cards (packages/protocol/src/cards.ts), which a Slack-compatible webhook's legacy attachments and
 // Block Kit blocks show under its message, framed as a link preview is (message-body.tsx) and laid out as Slack
 // lays out an attachment and its blocks. The room kept only addresses on named hosts, and each is checked again
 // here against the page's own host, which a card can't aim at, as a link preview can't, since every reader's
-// browser would fetch it signed in.
+// browser would fetch it signed in. A search's results mark what it matched in all of a card's text, as it
+// searched all of it. A button that acts tells the room it was clicked, which reports the click to the card's bot.
 
 /** The bars of Slack's named colors, in Ember's: a notice's green, the warning amber and an alert's red. */
 const BARS = new Map([
@@ -29,14 +31,22 @@ const BLOCKS = new Set(["p", "div", "li", "blockquote", "pre", "h1", "h2", "h3",
 /** How a table's column lines up its cells. */
 const ALIGNS = { left: "text-start", center: "text-center", right: "text-end" } as const;
 
-/** A message's cards, one under another. */
-export function BotCards({ cards, className }: { cards: Card[]; className?: string }) {
+/** What a click on a button that acts does, answering once its bot has taken the click, or hasn't. */
+export type CardClick = (action: CardAction) => Promise<boolean>;
+
+/** What the buttons that act do when they're clicked, where the cards are a message's in a room. Elsewhere, they're disabled. */
+const OnAction = createContext<CardClick | undefined>(undefined);
+
+/** A message's cards, one under another, whose buttons that act do `onAction`. */
+export function BotCards({ cards, className, onAction }: { cards: Card[]; className?: string; onAction?: CardClick }) {
   return (
-    <div className={cn("flex flex-col gap-2 pt-1", className)}>
-      {cards.map((card, index) => (
-        <BotCard key={index} card={card} />
-      ))}
-    </div>
+    <OnAction value={onAction}>
+      <div className={cn("flex flex-col gap-2 pt-1", className)}>
+        {cards.map((card, index) => (
+          <BotCard key={index} card={card} />
+        ))}
+      </div>
+    </OnAction>
   );
 }
 
@@ -96,7 +106,7 @@ function Part({ part, titleId }: { part: CardPart; titleId?: string }) {
     case "header":
       return (
         <h4 id={titleId} className="text-[18px] leading-[24px] font-bold wrap-anywhere text-message-ink">
-          {part.text}
+          <Marked>{part.text}</Marked>
         </h4>
       );
     case "text":
@@ -149,7 +159,7 @@ function CardText({ html, folds = false, small = false, className }: { html: str
 }
 
 /**
- * A section: its text over its fields, with a thumbnail, or a link button, at their right, as Slack shows a
+ * A section: its text over its fields, with a thumbnail, or a button, at their right, as Slack shows a
  * section's accessory. In a card under 400px wide, the button goes under them, leaving the text room.
  */
 function Section({ html, fields, thumb, button }: { html?: string; fields?: CardField[]; thumb?: CardImage; button?: CardButton }) {
@@ -172,7 +182,11 @@ function Fields({ fields }: { fields: CardField[] }) {
     <div className="grid grid-cols-2 gap-x-[2ch] gap-y-2 pt-1 @max-[400px]:grid-cols-1">
       {fields.map((field, index) => (
         <div key={index} className={cn("min-w-0", !field.short && "col-span-full")}>
-          {field.title !== undefined && <div className="text-[13px] leading-[18px] font-semibold wrap-anywhere text-message-muted">{field.title}</div>}
+          {field.title !== undefined && (
+            <div className="text-[13px] leading-[18px] font-semibold wrap-anywhere text-message-muted">
+              <Marked>{field.title}</Marked>
+            </div>
+          )}
           {field.html !== "" && <CardText html={field.html} />}
         </div>
       ))}
@@ -190,7 +204,11 @@ function Image({ image, title }: { image: CardImage; title?: string }) {
   if (!shown) return null;
   return (
     <figure className="flex min-w-0 flex-col gap-1 pt-1">
-      {title !== undefined && <figcaption className="text-[13px] leading-[18px] wrap-anywhere text-message-muted">{title}</figcaption>}
+      {title !== undefined && (
+        <figcaption className="text-[13px] leading-[18px] wrap-anywhere text-message-muted">
+          <Marked>{title}</Marked>
+        </figcaption>
+      )}
       <MessageLink href={shown.url} aria-label={shown.alt === "" ? `Image from ${new URL(shown.url).hostname}` : undefined} className="block w-fit max-w-full">
         <RemoteImage src={shown.url} alt={shown.alt} className="max-h-[500px] max-w-[min(100%,360px)] rounded-[6px] object-contain" />
       </MessageLink>
@@ -282,8 +300,16 @@ function Tile({ tile, inRow }: { tile: CardTile; inRow: boolean }) {
           <div className="flex min-w-0 items-center gap-[1ch]">
             {icon && <RemoteImage src={icon.url} alt={icon.alt} className="size-8 shrink-0 rounded-[6px] object-cover" />}
             <div className="min-w-0">
-              {tile.title !== undefined && <div className="text-[15px] leading-[22px] font-semibold wrap-anywhere text-message-ink">{tile.title}</div>}
-              {tile.subtitle !== undefined && <div className="text-[13px] leading-[18px] wrap-anywhere text-message-muted">{tile.subtitle}</div>}
+              {tile.title !== undefined && (
+                <div className="text-[15px] leading-[22px] font-semibold wrap-anywhere text-message-ink">
+                  <Marked>{tile.title}</Marked>
+                </div>
+              )}
+              {tile.subtitle !== undefined && (
+                <div className="text-[13px] leading-[18px] wrap-anywhere text-message-muted">
+                  <Marked>{tile.subtitle}</Marked>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -300,29 +326,57 @@ function Tile({ tile, inRow }: { tile: CardTile; inRow: boolean }) {
   );
 }
 
-/** A card's link buttons, bordered, filled for `primary`, and red for `danger`, as Delete is in both modes. */
+/** A card's buttons, bordered, filled for `primary`, and red for `danger`, as Delete is in both modes: links, and those that act. */
 function Buttons({ buttons, className }: { buttons: CardButton[]; className?: string }) {
-  const shown = buttons.flatMap((button) => {
-    const href = shownAddress(button.href);
+  const shown = buttons.flatMap((button): CardButton[] => {
+    if (button.action) return [button];
+    const href = button.href === undefined ? undefined : shownAddress(button.href);
     return href ? [{ ...button, href }] : [];
   });
   if (shown.length === 0) return null;
   return (
     <div className={cn("flex flex-wrap gap-2 pt-1", className)}>
-      {shown.map(({ text, href, style }, index) => (
-        <Button
-          key={index}
-          asChild
-          size="sm"
-          variant={style ? "default" : "outline"}
-          className={cn("max-w-full touch:min-h-11", style === "danger" && "bg-negative-button text-white hover:bg-negative-button/90")}
-        >
-          <MessageLink href={href}>
-            <span className="truncate">{text}</span>
-          </MessageLink>
-        </Button>
-      ))}
+      {shown.map(({ text, href, action, style }, index) => {
+        const label = (
+          <span className="truncate">
+            <Marked>{text}</Marked>
+          </span>
+        );
+        const look = {
+          size: "sm",
+          variant: style ? "default" : "outline",
+          className: cn("max-w-full touch:min-h-11", style === "danger" && "bg-negative-button text-white hover:bg-negative-button/90"),
+        } as const;
+        return action ? (
+          <ActionButton key={index} action={action} {...look}>
+            {label}
+          </ActionButton>
+        ) : (
+          <Button key={index} asChild {...look}>
+            <MessageLink href={href!}>{label}</MessageLink>
+          </Button>
+        );
+      })}
     </div>
+  );
+}
+
+/**
+ * A button that acts: a click tells its bot, and it waits, disabled, until the room says the bot has answered,
+ * or why it hasn't, which the room shows. It's disabled where a click has nowhere to go.
+ */
+function ActionButton({ action, children, ...look }: { action: CardAction; children: ReactNode } & Pick<ComponentProps<typeof Button>, "size" | "variant" | "className">) {
+  const onAction = useContext(OnAction);
+  const [waiting, setWaiting] = useState(false);
+  const click = () => {
+    if (!onAction) return;
+    setWaiting(true);
+    void onAction(action).finally(() => setWaiting(false));
+  };
+  return (
+    <Button type="button" disabled={!onAction || waiting} aria-busy={waiting || undefined} onClick={click} {...look}>
+      {children}
+    </Button>
   );
 }
 
@@ -332,7 +386,11 @@ function Footer({ text, icon, at }: { text?: string; icon?: string; at?: number 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-[0.5ch] pt-1 text-xs text-message-muted">
       <Icon url={icon} />
-      {text !== undefined && <span className="min-w-0 wrap-anywhere">{text}</span>}
+      {text !== undefined && (
+        <span className="min-w-0 wrap-anywhere">
+          <Marked>{text}</Marked>
+        </span>
+      )}
       {text !== undefined && moment && <span aria-hidden>·</span>}
       {moment && <time dateTime={moment.toISOString()}>{dateTimeLabel(moment)}</time>}
     </div>
@@ -350,10 +408,10 @@ function Linked({ href, className, children }: { href?: string; className?: stri
   const shown = href && shownAddress(href);
   return shown ? (
     <MessageLink href={shown} className={cn("hover:underline", className)}>
-      {children}
+      <Marked>{children}</Marked>
     </MessageLink>
   ) : (
-    children
+    <Marked>{children}</Marked>
   );
 }
 

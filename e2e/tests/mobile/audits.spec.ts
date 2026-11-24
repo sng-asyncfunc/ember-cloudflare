@@ -74,6 +74,22 @@ test("a field all of which shows, in a label partly scrolled out of view, fails 
   expect(touchTargets).toEqual([expect.stringMatching(/^<input> "Small" is .* partly scrolled out of view/)]);
 });
 
+test("a control scrolled a pixel out of view counts as all shown, crowded only by one that overlaps it", async ({ page, safeArea }) => {
+  // Each list stacks two 44px buttons, as a phone stacks the Message options of one person's messages,
+  // and is scrolled a pixel past the first one's top. Only in the second list do the buttons overlap.
+  const list = (label: string, overlap: number) => `
+    <div class="list" style="height: 200px; overflow-y: auto">
+      <div style="height: 100px"></div>
+      <button aria-label="${label}" style="display: block; margin: 0; width: 44px; height: 44px"></button>
+      <button aria-label="Under ${label}" style="display: block; margin: -${overlap}px 0 0; width: 44px; height: 44px"></button>
+      <div style="height: 200px"></div>
+    </div>`;
+  await page.setContent(phonePage(`${list("Touching", 0)}${list("Overlapped", 2)}`));
+  await page.evaluate(() => document.querySelectorAll(".list").forEach((list) => (list.scrollTop = 101)));
+  const { touchTargets } = await auditScreen(page, safeArea);
+  expect(touchTargets).toEqual([expect.stringContaining('<button> "Overlapped" is 44px×44px; a 44px fingertip on it can land on <button> "Under Overlapped"')]);
+});
+
 test("a control covered for good by something floating over its list fails, but not one the list can scroll clear", async ({ page, safeArea }) => {
   // The last button in each list sits under a floating notice; only the second list has room to
   // scroll it out from under.
@@ -154,20 +170,27 @@ test("a modal dialog isn't cut off by the box it's in, which it's drawn over", a
   expect(overflow).toEqual([]);
 });
 
-test("text cut off for good fails, but not text clamped on purpose", async ({ page, safeArea }) => {
+test("text cut off for good fails, but not text clamped or folded on purpose", async ({ page, safeArea }) => {
   await page.setContent(
     phonePage(`
       <p style="width: 120px; height: 20px; line-height: 20px; overflow: hidden">Cut off after one line, though it runs to several</p>
       <p style="width: 120px; line-height: 20px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1">Clamped to one line, though it runs to several</p>
+      <p id="folded" style="width: 120px; height: 20px; line-height: 20px; overflow: hidden">Folded after one line, though it runs to several</p>
+      <button aria-expanded="false" aria-controls="folded" style="width: 120px; height: 44px">Show more</button>
+      <p id="opened" style="width: 120px; height: 20px; line-height: 20px; overflow: hidden">Still cut off once opened, though it runs to several</p>
+      <button aria-expanded="true" aria-controls="opened" style="width: 120px; height: 44px">Show less</button>
     `),
   );
   const { overflow } = await auditScreen(page, safeArea);
-  expect(overflow).not.toEqual([]);
-  for (const problem of overflow) expect(problem).toContain('text in <p> "Cut off after one line');
+  expect(overflow.some((problem) => problem.includes('text in <p> "Cut off after one line'))).toBe(true);
+  expect(overflow.some((problem) => problem.includes('text in <p> "Still cut off once opened'))).toBe(true);
+  for (const problem of overflow) expect(problem).toMatch(/text in <p> "(Cut off after one line|Still cut off once opened)/);
 });
 
-test("a page wider than the phone fails, though the phone widens the window to fit it", async ({ page, safeArea }) => {
+test("a page wider than the phone fails, though the phone widens the window to fit it", async ({ page, safeArea, browserName }) => {
   await page.setContent(phonePage(`<div style="width: 120vw; height: 20px"></div>`));
   const { overflow } = await auditScreen(page, safeArea);
-  expect(overflow).toEqual([expect.stringContaining("the page scrolls sideways")]);
+  // WebKit's phones don't widen the window, so there the box past the screen's edge fails too.
+  const past = browserName === "webkit" ? [expect.stringMatching(/^<div> spans [\d.]+px–[\d.]+px on a [\d.]+px-wide screen$/)] : [];
+  expect(overflow).toEqual([expect.stringContaining("the page scrolls sideways"), ...past]);
 });

@@ -11,12 +11,13 @@ import {
 } from "@ember/protocol";
 import avatarPlaceholder from "@/components/avatar-placeholder.svg";
 import { ArrowRight, Camera, Eye, Lock, Mail, User as UserIcon, type IconoirIconProps } from "@/components/icons/iconoir";
-import { MainContent, SkipLink } from "@/components/main-content";
+import { SETUP_TITLE, SetupCard, STEP_BUTTON } from "@/components/setup-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useChosenPhoto, type PhotoChoice } from "@/hooks/use-chosen-photo";
 import { navigate } from "@/hooks/use-route";
-import { ApiError, setUpWorkspace } from "@/lib/api";
+import { ApiError, checkSetupPassword, setUpWorkspace } from "@/lib/api";
+import { whenIdle } from "@/lib/idle";
 import { cn } from "@/lib/utils";
 import { loadPage } from "@/lib/page";
 
@@ -24,49 +25,83 @@ import { loadPage } from "@/lib/page";
 // app's pages, which do (`useSelectOnEntry`). Its name and email address placeholders come from
 // /api/bootstrap: Kevin Rose's, unless the deployment suggests its own.
 //
-// A deployed Worker takes the setup link its deploy printed, `/first_run#token=<its setup token>`: the
-// token rides in the fragment, which no request or log sees, and goes with the form as a bearer token.
-// Opened without it, or where the Worker has no token to match (`setupAccess` from /api/bootstrap), the
-// page says what to do in the form's place, on a "Setup is locked" card, rather than showing a form that
+// A deployed Worker takes its setup password, which Deploy to Cloudflare's form had its deployer make
+// up: the page asks for it first, has the Worker check it, and sends it with the form as a bearer token.
+// One deployed from a terminal takes the setup link its deploy printed, `/first_run#token=<its setup
+// token>`, instead: the token rides in the fragment, which no request or log sees, and goes with the form
+// the same way, so the link opens the form without asking for a password. Where the Worker takes a
+// password too, the Worker checks the link's token first, so a link that's out of date asks for the
+// password instead. Opened without the link, or where the Worker has neither to match (`setupAccess`
+// from /api/bootstrap), the page says what to do in the form's place, rather than showing a form that
 // would be refused.
+//
+// Once the form has made the workspace, the page asks whether to turn huddles on (setup-huddles.tsx),
+// and opens Ember from there.
 
-const TITLE = "Set up Ember";
+/** What the setup password step says where the setup link it was opened with is refused. */
+const STALE_LINK = "That setup link is out of date. Type this Ember's setup password instead.";
 /** The token in a setup link's fragment. */
 const setupTokenOf = (hash: string) => new URLSearchParams(hash.slice(1)).get("token") || null;
-/** Makes a new setup token where the person sees it; `wrangler secret put` then asks for it, where a pipe would hide it. */
-const NEW_TOKEN = "openssl rand -hex 32";
-/** Gives the Worker the token made; the link then carries it. */
-const PUT_TOKEN = "wrangler secret put EMBER_SETUP_TOKEN";
+/** The Worker's setup password, as its settings in the Cloudflare dashboard name it. */
+const SETUP_PASSWORD = "EMBER_SETUP_PASSWORD";
+/** Where the dashboard keeps it. */
+const WHERE_SECRETS_ARE = "in the Cloudflare dashboard, in this Worker's Settings under Variables and Secrets";
 /** basecoat's `.ui-field .input`, over the stock input, and 44px tall for fingers as the app's fields are. */
 const INPUT = "h-10 touch:h-11 rounded-[0.7rem] bg-card pr-3 pl-9 text-base shadow-none md:text-base dark:bg-card focus-visible:border-input focus-visible:ring-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-solid focus-visible:outline-ring";
 const FIELD_ICON = "pointer-events-none absolute top-1/2 left-3 z-[1] size-[1.125rem] -translate-y-1/2 text-muted-foreground";
-/** basecoat's `.ui-skip-link` (theme.css): with no header to show it under, it shows at the top left, clear of a notch. */
-const SKIP_LINK = "focus:top-[calc(0.5rem+env(safe-area-inset-top))] focus:left-[max(0.5rem,env(safe-area-inset-left))] focus:rounded-lg focus:border-0 focus:bg-card focus:px-4 focus:py-3 focus:outline-2 focus:outline-offset-0 focus:outline-ring";
+
+/** The question about huddles, which loads with the pages few visits need, apart from the rest of the app. */
+const loadSetupHuddles = () => import("@/components/workspace/pages").then((pages) => pages.SetupHuddles);
+type SetupHuddles = Awaited<ReturnType<typeof loadSetupHuddles>>;
+
+interface Props {
+  placeholders: SetupPlaceholders;
+  access: SetupAccess;
+  onSetUp: (workspace: NewWorkspace) => void;
+}
 
 /**
- * Creates the workspace and its first administrator, with the photo they choose, then opens general,
- * its first room, through the setup link where the deployment takes one (`access`).
+ * Creates the workspace and its first administrator, with the photo they choose, given the setup
+ * password or link where the deployment takes one (`access`), asks whether to turn huddles on, and then
+ * opens general, its first room.
  */
-export function SetupPage(props: { placeholders: SetupPlaceholders; access: SetupAccess; onSetUp: (workspace: NewWorkspace) => void }) {
+export function SetupPage({ placeholders, access, onSetUp }: Props) {
   // Pasting the setup link over this page's address only changes the fragment, which loads no new
   // page, so each link opened starts afresh here, as the sign-in link page's does.
   const [opened, setOpened] = useState(0);
+  /** The workspace, once the form has made it, and what asks about huddles before it opens. */
+  const [made, setMade] = useState<{ workspace: NewWorkspace; SetupHuddles: SetupHuddles } | null>(null);
   useEffect(() => {
     const open = () => setOpened((count) => count + 1);
     addEventListener("hashchange", open);
     return () => removeEventListener("hashchange", open);
   }, []);
-  return <Setup key={opened} {...props} />;
-}
-
-function Setup({ placeholders, access, onSetUp }: { placeholders: SetupPlaceholders; access: SetupAccess; onSetUp: (workspace: NewWorkspace) => void }) {
-  const [setupToken] = useState(() => setupTokenOf(location.hash));
-
   useEffect(() => {
     const title = document.title;
-    document.title = TITLE;
+    document.title = SETUP_TITLE;
     return () => void (document.title = title);
   }, []);
+
+  const open = (workspace: NewWorkspace) => {
+    navigate(`/rooms/${workspace.room.id}`, { replace: true });
+    onSetUp(workspace);
+  };
+  // Where the question can't load, Ember opens without it, and huddles wait in community settings.
+  const askAboutHuddles = (workspace: NewWorkspace) =>
+    loadSetupHuddles().then(
+      (SetupHuddles) => setMade({ workspace, SetupHuddles }),
+      () => open(workspace),
+    );
+
+  if (made) return <made.SetupHuddles onOpen={() => open(made.workspace)} />;
+  return <Setup key={opened} placeholders={placeholders} access={access} onSetUp={askAboutHuddles} />;
+}
+
+function Setup({ placeholders, access, onSetUp }: Props) {
+  const [setupToken] = useState(() => setupTokenOf(location.hash));
+  /** The setup password, or the setup link's token, the Worker has accepted, where it takes a password. */
+  const [accepted, setAccepted] = useState<string | null>(null);
+
   // The token leaves the address bar and this tab's history as the page opens.
   useEffect(() => {
     if (location.hash) history.replaceState(history.state, "", location.pathname + location.search);
@@ -74,10 +109,79 @@ function Setup({ placeholders, access, onSetUp }: { placeholders: SetupPlacehold
 
   if (access === "closed") return <SetupClosed />;
   if (access === "link" && setupToken === null) return <SetupLinkNeeded />;
-  return <SetupForm placeholders={placeholders} setupToken={setupToken} onSetUp={onSetUp} />;
+  if (access === "password" && accepted === null) return <SetupPasswordStep linkToken={setupToken} onAccepted={setAccepted} />;
+  return <SetupForm placeholders={placeholders} setupSecret={access === "password" ? accepted : setupToken} onSetUp={onSetUp} />;
 }
 
-function SetupForm({ placeholders, setupToken, onSetUp }: { placeholders: SetupPlaceholders; setupToken: string | null; onSetUp: (workspace: NewWorkspace) => void }) {
+/**
+ * The page's first step where the deployment has a setup password: the Worker checks it before the
+ * form opens, so a mistyped one is said to be wrong before anything else is filled in. The token of a
+ * setup link it opens with, which a deploy may have printed too, is checked first the same way, so a
+ * link that's out of date asks for the password rather than opening a form that would be refused.
+ */
+function SetupPasswordStep({ linkToken, onAccepted }: { linkToken: string | null; onAccepted: (secret: string) => void }) {
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(linkToken !== null);
+  const input = useRef<HTMLInputElement>(null);
+  const linkChecked = useRef(false);
+
+  /** Has the Worker check `secret`, the password typed or the token of the link the page opened `withLink`. */
+  async function check(secret: string, withLink = false) {
+    setBusy(true);
+    setRefusal(null);
+    setProblem(null);
+    try {
+      await checkSetupPassword(secret);
+      onAccepted(secret);
+    } catch (error) {
+      setBusy(false);
+      // A link that couldn't be checked opens the form all the same, which has it checked again when it's sent.
+      if (withLink && !(error instanceof ApiError && error.status < 500)) return onAccepted(secret);
+      if (!(error instanceof ApiError)) return setProblem("Couldn't reach Ember. Check your connection and try again.");
+      // Someone else set it up first.
+      if (error.status === 409) return loadPage("/");
+      // Too many tries, say, which no other password would get past.
+      if (error.status !== 403) return setProblem(error.message);
+      // A refused one starts over, saying why beneath it.
+      if (input.current) input.current.value = "";
+      setRefusal(withLink ? STALE_LINK : error.message);
+      input.current?.focus();
+    }
+  }
+
+  // Once, though development's strict mode runs effects twice.
+  useEffect(() => {
+    if (linkToken === null || linkChecked.current) return;
+    linkChecked.current = true;
+    void check(linkToken, true);
+  }, [linkToken]);
+
+  return (
+    <SetupCard problem={problem} subtitle="Ember is waiting for its administrator.">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void check(input.current?.value ?? "");
+        }}
+      >
+        <div className="grid gap-6 px-5 pt-6 pb-7">
+          <SetupPasswordField ref={input} refusal={refusal} />
+          <p className="text-sm leading-normal text-muted-foreground [overflow-wrap:anywhere]">
+            Forgot it? Give <Code>{SETUP_PASSWORD}</Code> a new value {WHERE_SECRETS_ARE}, then type that one.
+          </p>
+        </div>
+        <footer className="border-t bg-surface p-5">
+          <Button type="submit" disabled={busy} className={cn(STEP_BUTTON, "w-full")}>
+            Continue <ArrowRight className="size-[1.125rem]" />
+          </Button>
+        </footer>
+      </form>
+    </SetupCard>
+  );
+}
+
+function SetupForm({ placeholders, setupSecret, onSetUp }: { placeholders: SetupPlaceholders; setupSecret: string | null; onSetUp: (workspace: NewWorkspace) => void }) {
   const [name, setName] = useState("");
   const [emailAddress, setEmailAddress] = useState("");
   const [passwordTooShort, setPasswordTooShort] = useState(false);
@@ -85,15 +189,16 @@ function SetupForm({ placeholders, setupToken, onSetUp }: { placeholders: SetupP
   const [busy, setBusy] = useState(false);
   const passwordInput = useRef<HTMLInputElement>(null);
   const photo = useChosenPhoto();
+  // What asks about huddles next loads while the form is filled in, so that it's there once it's sent.
+  useEffect(() => whenIdle(() => void loadSetupHuddles().catch(() => {})), []);
 
   async function submit() {
     setBusy(true);
     setPasswordTooShort(false);
     setProblem(null);
     try {
-      const workspace = await setUpWorkspace({ name, emailAddress, password: passwordInput.current?.value ?? "" }, await photo.photo(), setupToken);
-      navigate(`/rooms/${workspace.room.id}`, { replace: true });
-      onSetUp(workspace);
+      // The form stays as it was sent until what comes next shows.
+      onSetUp(await setUpWorkspace({ name, emailAddress, password: passwordInput.current?.value ?? "" }, await photo.photo(), setupSecret));
     } catch (error) {
       setBusy(false);
       if (!(error instanceof ApiError)) return setProblem("Couldn't reach Ember. Check your connection and try again.");
@@ -107,7 +212,7 @@ function SetupForm({ placeholders, setupToken, onSetUp }: { placeholders: SetupP
       if (error.field === "avatar") return photo.refuse(error.message);
       // Someone else set it up first.
       if (error.status === 409) return loadPage("/");
-      // A setup link that isn't this deployment's is refused (403) with what to do, said here.
+      // A setup password or link that isn't this deployment's is refused (403) with what to do, said here.
       setProblem(error.message);
     }
   }
@@ -154,7 +259,7 @@ function SetupForm({ placeholders, setupToken, onSetUp }: { placeholders: SetupP
           </div>
         </div>
         <footer className="border-t bg-surface p-5">
-          <Button type="submit" disabled={busy} className="h-10 w-full gap-2 rounded-[0.7rem] text-base font-medium touch:h-11">
+          <Button type="submit" disabled={busy} className={cn(STEP_BUTTON, "w-full")}>
             Continue <ArrowRight className="size-[1.125rem]" />
           </Button>
         </footer>
@@ -173,53 +278,25 @@ function SetupLinkNeeded() {
           setup token, so only whoever deployed it can set it up.
         </p>
         <p>
-          The link is in the output of <Code>pnpm run deploy</Code>, or in the build's log in the Cloudflare dashboard after Deploy to Cloudflare. If it's lost, make a
-          new token with <Code>{NEW_TOKEN}</Code>, give it to the Worker with <Code>{PUT_TOKEN}</Code>, which asks for it, and open the link with that token.
+          The link is in the output of <Code>pnpm run deploy</Code>, or in the build's log in the Cloudflare dashboard after Deploy to Cloudflare. If it's lost, give
+          the Worker a setup password instead: set <Code>{SETUP_PASSWORD}</Code> {WHERE_SECRETS_ARE}, then reload this page.
         </p>
       </Notice>
     </SetupCard>
   );
 }
 
-/** The page without its form: the Worker has no setup token, so there's no link to open yet. */
+/** The page without its form: the Worker has neither a setup password nor a setup token. */
 function SetupClosed() {
   return (
     <SetupCard subtitle="Nobody can set it up yet.">
       <Notice>
-        <p>This deployment has no setup token, so there's no setup link to open.</p>
+        <p>This deployment has no setup password, so nobody can set it up.</p>
         <p>
-          Deploy it with <Code>pnpm run deploy</Code>, which makes a token and prints the link, or make one with <Code>{NEW_TOKEN}</Code>, give it to the Worker with{" "}
-          <Code>{PUT_TOKEN}</Code>, which asks for it, and open <Code>{`${location.origin}/first_run#token=<the token>`}</Code>.
+          Give it one: set <Code>{SETUP_PASSWORD}</Code> {WHERE_SECRETS_ARE}, then reload this page.
         </p>
       </Notice>
     </SetupCard>
-  );
-}
-
-/** The first-run card, with the page's skip link and the alert above it, around the form or what stands in for it. */
-function SetupCard({ subtitle, problem = null, children }: { subtitle: string; problem?: string | null; children: ReactNode }) {
-  return (
-    <>
-      <SkipLink className={SKIP_LINK} />
-      <MainContent
-        data-ember-preserve-selection
-        className="grid min-h-svh grid-cols-[minmax(0,28rem)] place-content-center justify-items-center gap-4 bg-surface pt-[calc(2.5rem+env(safe-area-inset-top))] pr-[max(1rem,env(safe-area-inset-right))] pb-[calc(2.5rem+env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] upto-380px:pt-[calc(1.25rem+env(safe-area-inset-top))] upto-380px:pb-[calc(1.25rem+env(safe-area-inset-bottom))]"
-      >
-        {problem && (
-          <div role="alert" aria-atomic="true" className="w-full rounded-lg border bg-card px-4 py-3.5">
-            {problem}
-          </div>
-        )}
-        <section aria-label={TITLE} className="w-full min-w-0 overflow-hidden rounded-2xl border bg-card text-card-foreground">
-          <header className="flex flex-col items-center px-5 pt-5 text-center">
-            <img src="/ember-icon.png" alt="Ember" width={48} height={48} className="mb-4 block size-12 object-contain" />
-            <h1 className="text-2xl leading-[1.3] font-[550] tracking-[-0.025em] upto-380px:text-[1.375rem]">{TITLE}</h1>
-            <p className="mt-2 text-base leading-normal text-muted-foreground upto-380px:text-sm">{subtitle}</p>
-          </header>
-          {children}
-        </section>
-      </MainContent>
-    </>
   );
 }
 
@@ -288,6 +365,45 @@ function Field({ id, label, icon: Icon, children }: { id: string; label: string;
   );
 }
 
+/** The setup password's field, with its show and hide toggle, saying why one was refused in place of its description. */
+function SetupPasswordField({ ref, refusal }: { ref: Ref<HTMLInputElement>; refusal: string | null }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="grid min-w-0 gap-2">
+      <label htmlFor="setup_password" className="text-base leading-normal font-medium">
+        Setup password
+      </label>
+      <div className="relative min-w-0">
+        <Lock className={FIELD_ICON} />
+        {/* Uncontrolled, as the account's password is, and kept from password managers, which have nothing to fill in. */}
+        <Input
+          ref={ref}
+          id="setup_password"
+          type={visible ? "text" : "password"}
+          placeholder="••••••••"
+          autoComplete="off"
+          autoFocus
+          required
+          aria-invalid={refusal ? true : undefined}
+          aria-describedby="setup-password-description"
+          data-1p-ignore
+          className={cn(INPUT, "pr-11 touch:pr-12")}
+        />
+        <PasswordToggle controls="setup_password" visible={visible} onToggle={() => setVisible(!visible)} />
+      </div>
+      {refusal ? (
+        <p id="setup-password-description" role="alert" className="text-sm leading-normal text-destructive">
+          {refusal}
+        </p>
+      ) : (
+        <p id="setup-password-description" className="text-sm leading-normal text-muted-foreground">
+          The one you gave Ember when you deployed it.
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** The password field, with its show and hide toggle. */
 function PasswordField({ ref, tooShort }: { ref: Ref<HTMLInputElement>; tooShort: boolean }) {
   const [visible, setVisible] = useState(false);
@@ -312,16 +428,7 @@ function PasswordField({ ref, tooShort }: { ref: Ref<HTMLInputElement>; tooShort
           aria-describedby="password-description"
           className={cn(INPUT, "pr-11 touch:pr-12")}
         />
-        <button
-          type="button"
-          aria-controls="user_password"
-          aria-label={visible ? "Hide password" : "Show password"}
-          aria-pressed={visible}
-          onClick={() => setVisible(!visible)}
-          className="absolute top-1/2 right-[0.2rem] grid size-9 -translate-y-1/2 touch:size-11 cursor-pointer place-items-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring aria-pressed:text-foreground"
-        >
-          <Eye className="size-[1.125rem]" />
-        </button>
+        <PasswordToggle controls="user_password" visible={visible} onToggle={() => setVisible(!visible)} />
       </div>
       {tooShort ? (
         <p id="password-description" role="alert" className="text-sm leading-normal text-destructive">
@@ -333,5 +440,21 @@ function PasswordField({ ref, tooShort }: { ref: Ref<HTMLInputElement>; tooShort
         </p>
       )}
     </div>
+  );
+}
+
+/** A password field's show and hide toggle, over the field's right end. */
+function PasswordToggle({ controls, visible, onToggle }: { controls: string; visible: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-controls={controls}
+      aria-label={visible ? "Hide password" : "Show password"}
+      aria-pressed={visible}
+      onClick={onToggle}
+      className="absolute top-1/2 right-[0.2rem] grid size-9 -translate-y-1/2 touch:size-11 cursor-pointer place-items-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring aria-pressed:text-foreground"
+    >
+      <Eye className="size-[1.125rem]" />
+    </button>
   );
 }

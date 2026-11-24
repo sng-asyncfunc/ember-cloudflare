@@ -42,7 +42,8 @@ test.describe("Custom CSS", () => {
     await css.fill("");
     await page.getByRole("region", { name: "Custom CSS" }).getByRole("button", { name: "Save changes" }).click();
     await expect.poll(() => styled(otherTab)).toBe("");
-    expect(await styled(page)).toBe("");
+    // The saving page hears of it from its answer or its own socket, either of which can come after the other tab's.
+    await expect.poll(() => styled(page)).toBe("");
   });
 
   test("a member who opens Custom CSS is sent to workspace settings, told why", async ({ page, browser, baseURL }) => {

@@ -10,7 +10,7 @@ and how it's tested. The [self-hosting guide](self-hosting.md) covers deploying 
 | Path | Package | What |
 |---|---|---|
 | `apps/web` | `@ember/web` | React + Vite + Tailwind CSS v4 + shadcn/ui. The workspace UI. |
-| `apps/worker` | `@ember/worker` | The Worker (`/api/*`, `/up`, the app's pages with Campfire's headers and error pages, the web app manifest, static assets) and the `ChatRoom`, `Workspace`, `SearchIndex`, `PasswordHasher` and `Unfurler` Durable Objects. |
+| `apps/worker` | `@ember/worker` | The Worker (`/api/*`, `/up`, the app's pages with Campfire's headers and error pages, the web app manifest, static assets) and the `ChatRoom`, `Workspace`, `SearchIndex`, `PasswordHasher`, `Unfurler`, `AppConnector` and `OutsideAi` Durable Objects. |
 | `packages/protocol` | `@ember/protocol` | WebSocket frame types and validation shared by both, and the addresses of the app's pages. |
 | `packages/richtext` | `@ember/richtext` | Message bodies as Campfire's Action Text reads them: sanitizing, plain text, mentions and emoji-only bodies, golden-tested against a corpus of Campfire's Rails outputs. |
 
@@ -43,8 +43,8 @@ optional settings, such as push notifications' keys, go in a `.dev.vars` beside 
 
 Open http://localhost:5173 and set up Ember: the first visitor creates the workspace's administrator
 and its rooms, general and random. Then open a second browser, pick a name, and chat with yourself.
-On localhost setup is open to whoever's there; a deployed Worker takes the setup link its deploy
-prints ([Deploying](self-hosting.md#deploying)).
+On localhost setup is open to whoever's there; a deployed Worker takes its setup password, or the
+setup link its deploy prints ([Deploying](self-hosting.md#deploying)).
 
 Or, before setting it up, run `pnpm seed` to have a made-up team set it up and fill its rooms and DMs
 with conversations that use everything a message can: threads, quotes, mentions, reactions, pictures,
@@ -64,10 +64,13 @@ works, and [`docs/database.md`](database.md) compares the schema with Campfire's
 
 ## Browser tests
 
-`e2e/` drives the production build in Chromium, against `wrangler dev` on :8788 with its own
-state in `e2e/.wrangler`. Every suite shares `e2e/playwright.config.ts` and `e2e/fixtures.ts`
+`e2e/` drives the production build in Chromium, and in Safari's engine, WebKit, against
+`wrangler dev` on :8788 with its own state in `e2e/.wrangler`. Every suite shares `e2e/playwright.config.ts` and `e2e/fixtures.ts`
 (sign in, an isolated room, other participants over a real WebSocket); each adds its projects
-from `e2e/projects/` and its specs under `e2e/tests/<suite>/`.
+from `e2e/projects/` and its specs under `e2e/tests/<suite>/`. The fixtures have Playwright send a
+test's request again, once, should its connection be reset: `wrangler dev` closes a connection that
+has been idle for five seconds, and a request sent at that moment, on one Playwright kept open, is
+lost before the server reads it.
 
 ```sh
 pnpm --filter @ember/e2e exec playwright install chromium   # once
@@ -75,11 +78,39 @@ pnpm test:e2e       # every suite
 pnpm test:features  # just the feature-by-feature suite, on a desktop browser
 pnpm test:mobile    # just the phones
 pnpm screenshots    # remakes the web app manifest's screenshots
+
+pnpm --filter @ember/e2e exec playwright install webkit   # once
+E2E_BROWSER=webkit pnpm test:e2e   # the first run, the features and two iPhones, in WebKit
 ```
+
+`E2E_BROWSER=webkit` swaps the projects for those in `e2e/projects/webkit.ts`, under the same
+names, so `E2E_BROWSER=webkit pnpm test:features` runs just the features. Every browser on an iPhone
+or iPad is WebKit, as an iPhone app of Ember's would be, and CI runs these beside the Chromium ones.
+WebKit can't be told about a notch, so its iPhones report no safe-area insets, and the few tests
+that drive Chromium's DevTools run in Chromium alone. Playwright can't hand WebKit a 304, so a route
+that changes the server's answer goes through `answerChanged` in `e2e/fixtures.ts`, which asks the
+server for the whole answer. WebKit can let go of what a script sets on an object such as
+`navigator.mediaDevices` once nothing else holds it, handing the page a fresh one, so a stand-in for
+part of the browser goes on its prototype. WebKit on Linux names a download with an underscore for
+each space, which `downloadName` reads past, and Playwright's WebKit sends no click after a tap whose
+pointerdown the page cancelled, as the emoji picker's emoji do, though Safari on an iPhone does.
+WebKit's phones have no mouse wheel, nor notifications and push, which Safari on an iPhone has only
+for Ember on the Home Screen, and a page has WebKit's camera and microphone only once it's granted
+them. On a Mac, WebKit's Tab skips links and buttons unless Option is held, and a click focuses
+neither, as in Safari, End and Home scroll rather than move the cursor, and its iPhones draw a
+`<select>` 23px tall, too small a target for the phones' audit, so the tests that press those keys,
+expect a clicked link to have focus, or show a select on a phone fail there; CI runs WebKit on Linux,
+where they pass.
 
 Before the other suites start, the `first-run` project sets up the test server through the Set up
 Ember page, as its first visitor would. The `workspace-settings` suites, which change the whole
-workspace, get a second server, over HTTPS, which the same first run sets up.
+workspace, get a second server, over HTTPS, which the same first run sets up. Their browsers have a
+made-up microphone, camera and screen to share, for the huddles spec, whose stand-in for Cloudflare's
+Realtime SFU (`e2e/tests/workspace-settings/fake-sfu.ts`) passes what each browser says and shows on
+to the others through a page of its own, so a huddle there is heard and seen for real, each camera
+in whichever of its sizes the room asks for. It answers for Cloudflare's TURN service too, with
+servers at an address where nothing listens, so the spec sees which servers each tab's connections
+go by, and nothing is relayed.
 
 The features suite (`e2e/tests/features/`) has a spec per area of the app. Each test gets rooms of
 its own, and `members.signIn` opens a browser per person, so tests can chat, react and watch
@@ -105,18 +136,38 @@ within a week ([Updating](self-hosting.md#updating)), as General settings tells 
 going by GitHub's latest release. Copies move from release to release, never to `main` between them,
 and may skip any number of releases or go back one, so:
 
-- A released migration never changes, since copies that update have applied it already: CI fails a
-  pull request that changes one. A schema change goes in a new migration.
+- A released migration never changes, a beta's included, since copies that update have applied it
+  already: CI fails a pull request that changes one. A schema change goes in a new migration.
 - A migration adds to the tables rather than takes away, so the release before still runs on what it
   leaves: drop a column or table a release after the code stops using it.
-- `.github/workflows/update-ember.yml` stays as it is, since an update can't change a copy's
-  workflows: change `apps/worker/scripts/update-ember.ts`, which updates bring, instead.
+- `.github/workflows/update-ember.yml` stays thin, since an update can't change a copy's
+  workflows: change `apps/worker/scripts/update-ember.ts`, which updates bring, instead, and add to
+  the workflow only what a copy with the one before can do without, as the box for a beta is. Its copy
+  beside that script, which the deploy and General's release card offer copies without the
+  workflow, as Deploy to Cloudflare's are, is the same file, as CI checks. The tests read that
+  copy, never `.github`, since a copy's `.github` keeps its own workflow, or none, and a copy's
+  owner may run them.
 - Ember's other workflows run only in its own repository, and `pnpm run deploy` stays the deploy
   command, which every copy's Workers Builds runs.
+
+A beta of the next release, for trying it before it's out, is a pull request that sets the version
+to that release's with `-beta.1`, such as `0.5.0-beta.1`, then `-beta.2` and so on. The Release
+workflow publishes it as a pre-release, "Ember 0.5.0 beta 1", whose notes start with a Deploy to
+Cloudflare button for it and list what's changed since the release or beta before, and no copy is
+offered it unless it asks for one, or runs an earlier beta ([Betas](self-hosting.md#betas)). The
+tests that name the release expect it named "0.5 beta 1". The release itself then sets `0.5.0`, and
+its notes list what's changed since the release before, as the copies it's offered come from there.
+A release whose list is long can open its notes with what's new in it, in words: the pull request that
+raises the version adds them as `docs/releases/<version>.md`, as `docs/releases/0.5.0.md` does, and the
+Release workflow puts them ahead of the list. Write [at]ember there, as [at]channel and the rest, never
+@ and the name, which GitHub reads in a release's notes as one of its accounts, and lists among the
+release's contributors.
+Ember's version is a release's or a beta's, which the Release workflow checks, since copies tell
+them apart by their tags and know no other kind.
 
 ## Performance
 
 `pnpm perf` load-tests the Worker under `wrangler dev` on both storage backends (latency,
-throughput, fan-out, room size, history paging, search) and measures how the web app loads and renders a
-busy room. `perf/README.md` explains the scenarios and how to compare two runs; the numbers the
+throughput, fan-out, room size, history paging, search, huddles) and measures how the web app loads
+and renders a busy room. `perf/README.md` explains the scenarios and how to compare two runs; the numbers the
 suite started with are in `perf/baseline/report.md`.

@@ -13,6 +13,8 @@ export interface PhotoChoice {
   refusal: string | null;
   /** Takes the photo the file field has picked, or leaves none where it has none. */
   choose: (event: ChangeEvent<HTMLInputElement>) => void;
+  /** Takes `file` as the photo, as a picture field picks one, or with none, lets go of the photo chosen. */
+  take: (file: File | undefined) => void;
   /** Lets go of the photo, saying why it can't be had, so the form can be sent without it. */
   refuse: (reason: string) => void;
   /** The photo to send with the form, once its variant is made, or null when none is chosen. */
@@ -20,7 +22,7 @@ export interface PhotoChoice {
 }
 
 /**
- * The photo someone picks in the setup, join or bot form, which shows at once, as Campfire's
+ * The photo someone picks in the setup, join, bot or agent form, which shows at once, as Campfire's
  * upload_preview_controller.js shows it, while its variant is made (`avatarVariantOf`). A photo over 16
  * MB is refused at once, and the form shows nothing for a field that has nothing picked, where
  * Campfire's keeps showing a photo it won't send.
@@ -41,13 +43,14 @@ export function useChosenPhoto(): PhotoChoice {
     setRefusal(reason);
   }
 
-  function choose(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
+  function take(file: File | undefined) {
     if (file && file.size > MAX_AVATAR_SIZE) return refuse(AVATAR_TOO_LARGE);
     setRefusal(null);
     chosen.current = file ? avatarVariantOf(file).then((variant) => ({ file, variant })) : null;
     setPreview(file ? URL.createObjectURL(file) : null);
   }
 
-  return { input, preview, refusal, choose, refuse, photo: async () => chosen.current };
+  const choose = (event: ChangeEvent<HTMLInputElement>) => take(event.target.files?.[0]);
+
+  return { input, preview, refusal, choose, take, refuse, photo: async () => chosen.current };
 }

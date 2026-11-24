@@ -57,11 +57,20 @@ export const CHANGES_SAVED = "Changes saved.";
 /** A section's heading, 4px above what follows it in the section, which spaces its parts 24px apart. */
 export const SECTION_HEADING = "mb-1";
 
+/** A page's title, which a panel sets at 23px. */
+export const TITLE = "text-[23px] leading-[1.3] font-[650]";
+
+/**
+ * A link at the end of a title's row, such as Rooms and permissions' New room and Add a chat bot: one of
+ * the sections' buttons, 44px tall, with an icon before its label.
+ */
+export const TITLE_LINK = "inline-flex min-h-11 items-center justify-center gap-[0.5em] rounded-[9px] border bg-background px-3.5 py-2.5 font-medium";
+
 /** A page's heading, whose title a panel sets at 23px. */
 export function PageHeading({ title, id, className, children }: { title: string; id?: string; className?: string; children: ReactNode }) {
   return (
     <header className={cn("mb-6", className)}>
-      <h1 id={id} className="mb-1.5 text-[23px] leading-[1.3] font-[650]">
+      <h1 id={id} className={cn("mb-1.5", TITLE)}>
         {title}
       </h1>
       <p className="text-muted-foreground">{children}</p>

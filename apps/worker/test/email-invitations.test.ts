@@ -537,7 +537,7 @@ describe("Join with an invitation", () => {
 
       // Their profile offers Memberful as another way to sign in, rather than one they need.
       const answer = await apiWith(MEMBERFUL_KEYS, "/api/users/me/profile", { headers: { Cookie: cookieOf(signedIn) } });
-      expect(((await answer.json()) as ProfileAnswer).profile).toMatchObject({ membershipNeeded: false, memberful: false });
+      expect(((await answer.json()) as ProfileAnswer).profile).toMatchObject({ membershipNeeded: false, memberful: { membersOnly: true, connected: null } });
     });
 
     it("takes the invitation to an address off the list when someone joins with it another way, whatever its case", async () => {

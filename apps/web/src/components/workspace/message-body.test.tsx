@@ -1,11 +1,14 @@
 import { avatarSvg, type DirectoryUser, type User } from "@ember/protocol";
-import { displayBody, OPENGRAPH_EMBED_CONTENT_TYPE, previewContent } from "@ember/richtext/dom";
+import { displayBody, OPENGRAPH_EMBED_CONTENT_TYPE, previewContent, ROOM_MENTION_CONTENT_TYPE } from "@ember/richtext/dom";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PeopleContext, type People } from "@/hooks/use-directory";
+import { RoomsContext, type Rooms } from "@/hooks/use-rooms";
+import { marksFor } from "@/lib/search";
 import { MessageBody } from "./message-body";
+import { SearchMarks } from "./search-marks";
 
 afterEach(() => history.replaceState(null, "", "/"));
 
@@ -73,11 +76,69 @@ describe("Rich text, safely", () => {
     expect(content.querySelector(".hljs-keyword")).toHaveTextContent("SELECT");
   });
 
-  it("highlights a code block's lines, read from its line breaks", async () => {
-    const content = show('<pre data-language="javascript">const a = 1;<br>const b = 2;</pre>');
+  it("copies a highlighted code block's lines without the surrounding prose or another block", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const content = show('<p>Run this</p><pre data-language="javascript">const a = 1;<br>const b = 2;</pre><pre>another block</pre>');
     await highlighted(content);
     expect(content.querySelector("pre")!.textContent).toBe("const a = 1;\nconst b = 2;");
     expect(content.querySelectorAll(".hljs-keyword")).toHaveLength(2);
+    const button = within(content).getAllByRole("button", { name: "Copy code" })[0]!;
+    expect(content.querySelector("pre")).toHaveAttribute("data-language", "javascript");
+    expect(content.querySelector("pre button")).toBeNull();
+    await user.click(button);
+    expect(writeText).toHaveBeenCalledWith("const a = 1;\nconst b = 2;");
+    expect(button).toHaveClass("text-positive", "motion-safe:animate-success");
+    await user.click(button);
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect(button).toHaveClass("text-positive", "motion-safe:animate-success");
+  });
+
+  it("copies a code block containing a link as plain text, its line breaks kept", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const content = show("<pre>See https://example.com\n  next line</pre>");
+    expect(within(content).getByRole("link")).toHaveTextContent("https://example.com");
+    await user.click(within(content).getByRole("button", { name: "Copy code" }));
+    expect(writeText).toHaveBeenCalledWith("See https://example.com\n  next line");
+    const broken = show("<pre>curl https://example.com<br>echo done</pre>");
+    expect(within(broken).getByRole("link")).toHaveTextContent("https://example.com");
+    await user.click(within(broken).getByRole("button", { name: "Copy code" }));
+    expect(writeText).toHaveBeenLastCalledWith("curl https://example.com\necho done");
+  });
+
+  it("copies the lines a code block holds as blocks, as a bot can set them, each on its own line as it shows", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const content = show("<pre>echo one<div>echo two</div><div><div>echo three</div></div><div></div>echo four<br><p>echo five</p></pre>");
+    await user.click(within(content).getByRole("button", { name: "Copy code" }));
+    expect(writeText).toHaveBeenCalledWith("echo one\necho two\necho three\necho four\necho five");
+  });
+
+  it("copies nothing a code block hides, as the empty paragraph a message's styles hide, which starts no line", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    // index.css's rule, which tests don't load.
+    const styles = document.head.appendChild(document.createElement("style"));
+    styles.textContent = ".message-content p:empty { display: none }";
+    try {
+      const content = show("<pre>echo <p></p>one<div>echo two</div></pre>");
+      await user.click(within(content).getByRole("button", { name: "Copy code" }));
+      expect(writeText).toHaveBeenCalledWith("echo one\necho two");
+    } finally {
+      styles.remove();
+    }
+  });
+
+  it("leaves the button unchanged when the clipboard refuses", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("Denied"));
+    show("<pre>puts 1</pre>");
+    const button = screen.getByRole("button", { name: "Copy code" });
+    const classes = button.className;
+    await user.click(button);
+    expect(writeText).toHaveBeenCalledWith("puts 1");
+    expect(button.className).toBe(classes);
   });
 
   it("highlights neither inline code nor a code block with a link in it", async () => {
@@ -128,6 +189,61 @@ describe("How mentions look", () => {
   it("shows ☒ for someone no one knows, as a message from before messages named the people they mention doesn't", () => {
     expect(mention(new Map(), []).innerHTML).toBe("<p>Hi ☒!</p>");
     expect(mention(new Map(), [{ id: grace.id, name: "" }]).innerHTML).toBe("<p>Hi ☒!</p>");
+  });
+
+  it("shows @here and @channel by their names, in semibold as a person's name is in a mention of them", () => {
+    const special = (name: string) => `<action-text-attachment content-type="application/vnd.campfire.mention" sgid="${name}"></action-text-attachment>`;
+    expect(mention(new Map(), [], `<p>${special("here")} and ${special("channel")}: standup!</p>`).innerHTML).toBe(
+      '<p><span class="font-semibold">@here</span> and <span class="font-semibold">@channel</span>: standup!</p>',
+    );
+  });
+});
+
+/** A stored mention of room `roomId`. */
+const roomMention = (roomId: string) => `<action-text-attachment content-type="${ROOM_MENTION_CONTENT_TYPE}" sgid="${roomId}"></action-text-attachment>`;
+
+/** Shows `body` to someone in `rooms`, or before their sidebar has loaded, returning its content. */
+function mentioningRooms(rooms: Rooms | null, body: string) {
+  const { container } = render(
+    <RoomsContext value={rooms}>
+      <MessageBody nodes={shown(body)} mentions={[]} />
+    </RoomsContext>,
+  );
+  return container.querySelector(".message-content")!;
+}
+
+describe("How mentions of rooms look", () => {
+  const rooms: Rooms = new Map([["otters", { id: "otters", kind: "open", name: "Otter Pond", icon: null }]]);
+
+  it("names a room the reader's in after a #, linking to it, and opens it in place", async () => {
+    const content = mentioningRooms(rooms, `<p>See ${roomMention("otters")} today</p>`);
+    expect(content).toHaveTextContent("See #Otter Pond today");
+    const link = screen.getByRole("link", { name: "#Otter Pond" });
+    expect(link).toHaveAttribute("href", "/rooms/otters");
+    expect(link).not.toHaveAttribute("target");
+    await userEvent.click(link);
+    expect(location.pathname).toBe("/rooms/otters");
+  });
+
+  it("shows a room the reader isn't in as a lock and private room, linking nowhere", () => {
+    const content = mentioningRooms(rooms, `<p>See ${roomMention("secret")}</p>`);
+    expect(content).toHaveTextContent("See private room");
+    expect(content).not.toHaveTextContent("secret");
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(content.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("names the room without a link of its own inside a link, as a link can't hold another", () => {
+    mentioningRooms(rooms, `<p><a href="https://example.com">Notes from ${roomMention("otters")}</a></p>`);
+    expect(screen.getAllByRole("link")).toEqual([screen.getByRole("link", { name: "Notes from #Otter Pond" })]);
+  });
+
+  it("shows only the # until the sidebar has said which rooms the reader's in", () => {
+    expect(mentioningRooms(null, `<p>See ${roomMention("otters")}</p>`).innerHTML).toBe("<p>See #</p>");
+  });
+
+  it("shows ☒ for a mention that names no room", () => {
+    expect(mentioningRooms(rooms, `<p>See <action-text-attachment content-type="${ROOM_MENTION_CONTENT_TYPE}"></action-text-attachment></p>`).innerHTML).toBe("<p>See ☒</p>");
   });
 });
 
@@ -228,5 +344,54 @@ describe("Link previews in messages", () => {
     const content = show(`<p><a href="https://basecamp.com/">https://basecamp.com/</a></p>${preview(basecamp)}`, undefined, "https://basecamp.com/");
     expect(content.querySelector("p")).toBeNull();
     expect(within(content).getByRole("link", { name: "Basecamp" })).toBeInTheDocument();
+  });
+});
+
+describe("Search results mark what a search matched", () => {
+  /** A stored body as a search's results show it, marking `words`. */
+  function showMarked(html: string, words: string[]) {
+    const { container } = render(
+      <SearchMarks value={marksFor(words)}>
+        <MessageBody nodes={shown(html)} mentions={[]} />
+      </SearchMarks>,
+    );
+    return container.querySelector<HTMLElement>(".message-content")!;
+  }
+
+  it("marks each word it matched, wherever it is in the text, and leaves the text as it was", () => {
+    const content = showMarked("<p>Deploying the <strong>deploy</strong> now, not the redeploy</p><ul><li>deploy again</li></ul>", ["deploy", "Deploying"]);
+    expect([...content.querySelectorAll("mark[data-search-match]")].map((mark) => mark.textContent)).toEqual(["Deploying", "deploy", "deploy"]);
+    expect(content.textContent).toBe("Deploying the deploy now, not the redeploydeploy again");
+    expect(content.querySelector("strong mark")).toHaveTextContent("deploy");
+  });
+
+  it("marks words in a link's text, which stays a link", () => {
+    const content = showMarked('<p>See <a href="https://example.com/launch">the launch notes</a></p>', ["launch"]);
+    expect(within(content).getByRole("link", { name: "the launch notes" }).querySelector("mark")).toHaveTextContent("launch");
+  });
+
+  it("marks a word in each part of it that formatting splits, but not a part of a longer word, nor words across blocks", () => {
+    const content = showMarked("<p><strong>de</strong>ploy, <em>re</em>deploy <span>dep</span><s>loy</s></p><p>de</p><p>ploy</p>", ["deploy"]);
+    expect([...content.querySelectorAll("mark[data-search-match]")].map((mark) => mark.textContent)).toEqual(["de", "ploy", "dep", "loy"]);
+    expect(content.querySelector("strong mark")).toHaveTextContent("de");
+    expect(content.textContent).toBe("deploy, redeploy deploydeploy");
+  });
+
+  it("keeps the words it matched in a code block marked once the code is highlighted", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const content = showMarked('<pre data-language="javascript">const deploy = "deploy now";</pre>', ["deploy"]);
+    await highlighted(content);
+    expect([...content.querySelectorAll("mark[data-search-match]")].map((mark) => mark.textContent)).toEqual(["deploy", "deploy"]);
+    expect(content.querySelector(".hljs-string mark")).toHaveTextContent("deploy");
+    expect(content.textContent).toBe('const deploy = "deploy now";');
+    await user.click(within(content).getByRole("button", { name: "Copy code" }));
+    expect(writeText).toHaveBeenCalledWith('const deploy = "deploy now";');
+  });
+
+  it("marks nothing when the search had no words, nor Lexxy's highlights as matches", () => {
+    const content = showMarked("<p>Deploy <mark>soon</mark></p>", []);
+    expect(content.querySelectorAll("mark")).toHaveLength(1);
+    expect(content.querySelector("mark[data-search-match]")).toBeNull();
   });
 });

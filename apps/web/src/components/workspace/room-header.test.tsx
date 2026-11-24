@@ -1,19 +1,23 @@
-import { avatarSvg, type Room, type User } from "@ember/protocol";
-import { render, screen } from "@testing-library/react";
+import { avatarSvg, type DirectoryUser, type Room, type User } from "@ember/protocol";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Sheet } from "@/components/ui/sheet";
+import { AccountContext, useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { PushContext, type Push } from "@/hooks/use-push";
 import { PUSH_ON } from "@/test-push";
 import { INVOLVEMENT_NOT_SAVED } from "./notification-bell";
 import { RoomHeader } from "./room-header";
+import { OpenSearchContext, type OpenSearch } from "./search-box";
 
 const people = (count: number): User[] => Array.from({ length: count }, (_, i) => ({ id: `u${i}`, name: `Person ${i}` }));
 const general: Room = { id: "general", name: "general", kind: "open", icon: null };
 /** Ada's DM with Linus, as Linus reads it. */
 const adaDirect: Room = { id: "direct-1", kind: "direct", members: [{ id: "ada", name: "Ada" }, { id: "linus", name: "Linus" }], activeAt: "2026-10-15T12:00:00.000Z" };
+/** @ember, the AI assistant. */
+const ember: User = { id: "ember", name: "Ember" };
 
 afterEach(() => history.replaceState(null, "", "/"));
 
@@ -24,25 +28,28 @@ const statuses = () => screen.queryAllByRole("status").flatMap((status) => statu
  * The header inside the drawer's Sheet, which its menu button opens, as in the workspace, on a browser
  * with notifications on unless `push` says otherwise.
  */
-function renderHeader(props: Partial<ComponentProps<typeof RoomHeader>> = {}, onOpenChange?: (open: boolean) => void, push: Push = PUSH_ON) {
+function renderHeader(props: Partial<ComponentProps<typeof RoomHeader>> = {}, onOpenChange?: (open: boolean) => void, push: Push = PUSH_ON, openSearch: OpenSearch = () => {}) {
   return render(
     <PushContext value={push}>
-      <Sheet onOpenChange={onOpenChange}>
-        <RoomHeader
-          room={general}
-          name="general"
-          present={[]}
-          status="open"
-          offline={false}
-          favorite={false}
-          onStarred={vi.fn()}
-          involvement="mentions"
-          askForRoom={() => vi.fn()}
-          onSessionChanged={vi.fn()}
-          onFailed={vi.fn()}
-          {...props}
-        />
-      </Sheet>
+      <OpenSearchContext value={openSearch}>
+        <Sheet onOpenChange={onOpenChange}>
+          <RoomHeader
+            room={general}
+            name="general"
+            meId="linus"
+            present={[]}
+            status="open"
+            offline={false}
+            favorite={false}
+            onStarred={vi.fn()}
+            involvement="mentions"
+            askForRoom={() => vi.fn()}
+            onSessionChanged={vi.fn()}
+            onFailed={vi.fn()}
+            {...props}
+          />
+        </Sheet>
+      </OpenSearchContext>
     </PushContext>,
   );
 }
@@ -65,6 +72,7 @@ describe("Who's here", () => {
           <RoomHeader
             room={general}
             name="general"
+            meId="linus"
             present={people(2)}
             status="open"
             offline={false}
@@ -123,6 +131,49 @@ describe("Group DMs and DM names", () => {
     expect(screen.getByRole("navigation", { name: "Page" })).not.toHaveTextContent("#");
   });
 
+  it("badges a DM with @ember alone as an agent's after its name", () => {
+    renderHeader({ room: { ...adaDirect, members: [{ id: "ada", name: "Ada" }, ember] }, name: "Ember" });
+    const heading = screen.getByRole("heading", { level: 1 });
+    expect(heading).toHaveTextContent(/^Direct message with Ember$/);
+    expect(heading.nextElementSibling).toHaveTextContent(/^Agent$/);
+    expect(heading.nextElementSibling).toHaveAttribute("data-slot", "badge");
+  });
+
+  it("badges a DM with any agent alone, as the people directory lists it", () => {
+    const recap: DirectoryUser = { id: "u9", name: "Recap", bio: null, role: "bot", status: "active", avatarUrl: "/users/u9/avatar", agent: true };
+    render(
+      <PeopleContext value={new Map([[recap.id, recap]])}>
+        <Sheet>
+          <RoomHeader
+            room={{ ...adaDirect, members: [{ id: "ada", name: "Ada" }, { id: recap.id, name: recap.name }] }}
+            name="Recap"
+            meId="ada"
+            present={[]}
+            status="open"
+            offline={false}
+            favorite={false}
+            onStarred={vi.fn()}
+            involvement="mentions"
+            askForRoom={() => vi.fn()}
+            onSessionChanged={vi.fn()}
+            onFailed={vi.fn()}
+          />
+        </Sheet>
+      </PeopleContext>,
+    );
+    const heading = screen.getByRole("heading", { level: 1 });
+    expect(heading).toHaveTextContent(/^Direct message with Recap$/);
+    expect(heading.nextElementSibling).toHaveTextContent(/^Agent$/);
+  });
+
+  it("badges no other DM, nor a group DM @ember is in", () => {
+    renderHeader({ room: adaDirect, name: "Ada" });
+    expect(screen.queryByText("Agent")).not.toBeInTheDocument();
+    cleanup();
+    renderHeader({ room: { ...adaDirect, members: [...adaDirect.members, ember] }, name: "Ada and Ember" });
+    expect(screen.queryByText("Agent")).not.toBeInTheDocument();
+  });
+
   it("links to a DM's settings at a DM's address, saying it's a Ping's", () => {
     renderHeader({ room: adaDirect, name: "Ada" });
     const settings = screen.getByRole("link", { name: "Settings for this Ping" });
@@ -142,19 +193,23 @@ describe("Room settings page", () => {
   });
 });
 
-describe("Search page", () => {
-  it("links to search before the room's settings, in rooms and DMs alike, showing it in place", async () => {
+describe("Search box", () => {
+  it("links to search before the room's settings, in rooms and DMs alike, opening the search box in place, in the room", async () => {
     for (const [room, name] of [[general, "general"], [adaDirect, "Ada"]] as const) {
-      const { unmount } = renderHeader({ room, name });
+      const openSearch = vi.fn();
+      const { unmount } = renderHeader({ room, name }, undefined, PUSH_ON, openSearch);
       const search = screen.getByRole("link", { name: "Search messages" });
       expect(search).toHaveAttribute("title", "Search messages");
       expect(search).toHaveAttribute("href", "/searches");
       expect(search.compareDocumentPosition(screen.getByRole("link", { name: /^Settings for this/ })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      await userEvent.click(search);
+      expect(openSearch).toHaveBeenCalledExactlyOnceWith({ roomId: room.id, opener: search });
+      // A click with a modifier key is the browser's, as into a new tab.
+      expect(fireEvent.click(search, { ctrlKey: true })).toBe(true);
+      expect(openSearch).toHaveBeenCalledOnce();
       unmount();
     }
-    renderHeader();
-    await userEvent.click(screen.getByRole("link", { name: "Search messages" }));
-    expect(location.pathname).toBe("/searches");
+    expect(location.pathname).toBe("/");
   });
 });
 
@@ -242,5 +297,89 @@ describe("Notification levels", () => {
     vi.mocked(fetch).mockResolvedValueOnce(Response.json({ error: "Sign in" }, { status: 401 }));
     await userEvent.click(bell);
     expect(onFailed).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Huddles", () => {
+  /** Gives what's inside it a workspace where huddles are on. */
+  function HuddlesOn({ children }: { children: ReactNode }) {
+    return <AccountContext value={{ ...useAccount(), huddles: true }}>{children}</AccountContext>;
+  }
+  /** The header of `room`, as Linus reads it, where huddles are on and the people directory lists `listed`. */
+  const renderWithHuddles = (room: Room, name: string, listed: DirectoryUser[] = []) =>
+    render(
+      <PeopleContext value={new Map(listed.map((person) => [person.id, person]))}>
+        <PushContext value={PUSH_ON}>
+          <Sheet>
+            <RoomHeader
+              room={room}
+              name={name}
+              meId="linus"
+              present={[]}
+              status="open"
+              offline={false}
+              favorite={false}
+              onStarred={vi.fn()}
+              involvement="mentions"
+              askForRoom={() => vi.fn()}
+              onSessionChanged={vi.fn()}
+              onFailed={vi.fn()}
+            />
+          </Sheet>
+        </PushContext>
+      </PeopleContext>,
+      { wrapper: HuddlesOn },
+    );
+  const following = (a: Element, b: Element) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING;
+
+  it("has no huddle button until huddles are on, and Search stays on the narrowest phones", () => {
+    renderHeader();
+    expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Search messages" })).not.toHaveClass("max-[429px]:hidden");
+  });
+
+  it("starts its actions with the huddle button once they are, and gives up Search for it under 430px wide", () => {
+    renderWithHuddles(general, "general");
+    const search = screen.getByRole("link", { name: "Search messages" });
+    expect(following(screen.getByRole("button", { name: "Start huddle" }), search)).toBeTruthy();
+    expect(following(screen.getByRole("button", { name: "Huddle options" }), search)).toBeTruthy();
+    expect(search).toHaveClass("max-[429px]:hidden");
+  });
+
+  it("has none in a room whose settings don't allow huddles, which keeps Search", () => {
+    renderWithHuddles({ ...general, huddles: false }, "general");
+    expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Huddle options" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Search messages" })).not.toHaveClass("max-[429px]:hidden");
+  });
+
+  it("has it in a DM with someone to huddle with, where Search gives way to it too", () => {
+    renderWithHuddles(adaDirect, "Ada");
+    const search = screen.getByRole("link", { name: "Search messages" });
+    expect(following(screen.getByRole("button", { name: "Start huddle" }), search)).toBeTruthy();
+    expect(search).toHaveClass("max-[429px]:hidden");
+  });
+
+  it("has none in a DM with nobody to huddle with, their own, one with bots alone or one with someone who can no longer sign in, which keeps Search", () => {
+    const linus = { id: "linus", name: "Linus" };
+    const own = renderWithHuddles({ ...adaDirect, members: [linus] }, "Linus");
+    expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Search messages" })).not.toHaveClass("max-[429px]:hidden");
+    own.unmount();
+
+    const deploys: DirectoryUser = { id: "u8", name: "Deploys", bio: null, role: "bot", status: "active", avatarUrl: "/users/u8/avatar" };
+    const withBots: Room = { ...adaDirect, members: [linus, { id: deploys.id, name: deploys.name }, ember] };
+    const bots = renderWithHuddles(withBots, "Deploys and Ember", [deploys]);
+    expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument();
+    bots.unmount();
+
+    // Ada has been deactivated since the DM with her started.
+    renderWithHuddles(adaDirect, "Ada", [{ id: "ada", name: "Ada", bio: null, role: "member", status: "deactivated", avatarUrl: "/users/ada/avatar" }]);
+    expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument();
+  });
+
+  it("has it in a DM with a bot and someone else", () => {
+    renderWithHuddles({ ...adaDirect, members: [...adaDirect.members, ember] }, "Ada and Ember");
+    expect(screen.getByRole("button", { name: "Start huddle" })).toBeInTheDocument();
   });
 });

@@ -1,4 +1,5 @@
 import { SIGN_IN_REJECTED } from "@ember/protocol";
+import type { Page } from "@playwright/test";
 import { invitation, signInAsAdministrator, useOwnAddress } from "../../fixtures";
 import { RECOVERY_TOKEN } from "../../projects/features";
 import { expect, test } from "./fixtures";
@@ -37,15 +38,36 @@ test.describe("Rename the workspace", () => {
 });
 
 test.describe("Join link", () => {
-  test("a member's Membership settings have the welcome card's join link, which only administrators regenerate", async ({ members, request, baseURL }) => {
-    const grace = await members.signIn("Grace Hopper");
-    const { joinCode } = await invitation(request, grace.session);
-    await grace.page.getByRole("navigation", { name: "Workspace" }).getByRole("link", { name: "Workspace" }).click();
-    await grace.page.getByRole("navigation", { name: "Community settings" }).getByRole("link", { name: "Membership" }).click();
-    await expect(grace.page.getByRole("textbox", { name: "Share to invite more people" })).toHaveValue(new URL(`/join/${joinCode}`, baseURL).href);
-    await expect(grace.page.getByRole("link", { name: "Show join link QR code" })).toBeVisible();
-    await expect(grace.page.getByRole("button", { name: "Copy join link" })).toBeVisible();
-    await expect(grace.page.getByRole("button", { name: "Regenerate join link" })).toHaveCount(0);
+  /** Opens Membership in Community settings, from the rail's Workspace link. */
+  async function openMembership(page: Page) {
+    await page.getByRole("navigation", { name: "Workspace" }).getByRole("link", { name: "Workspace" }).click();
+    // Community settings shows its links while it loads, then draws them again once it has, losing a click that comes as it does.
+    await expect(page).toHaveTitle("Community settings");
+    await page.getByRole("navigation", { name: "Community settings" }).getByRole("link", { name: "Membership" }).click();
+  }
+
+  test("a member's Membership settings have the welcome card's join link, which only administrators regenerate", async ({ page, request, session, baseURL }) => {
+    await useOwnAddress(page);
+    const { joinCode } = await invitation(request, session);
+    await page.goto(`/join/${joinCode}`);
+    await page.getByLabel("Name").fill("Grace Hopper");
+    await page.getByLabel("Email address").fill(`grace-${crypto.randomUUID()}@example.com`);
+    await page.getByLabel("Password").fill("compiler");
+    await page.getByRole("button", { name: "Create account" }).click();
+    await expect(page.getByRole("link", { name: "Your profile" })).toHaveAttribute("title", "Grace Hopper");
+
+    await openMembership(page);
+    await expect(page.getByRole("textbox", { name: "Share to invite more people" })).toHaveValue(new URL(`/join/${joinCode}`, baseURL).href);
+    await expect(page.getByRole("link", { name: "Show join link QR code" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Copy join link" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Regenerate join link" })).toHaveCount(0);
+  });
+
+  test("someone who signed in with just a name isn't given the join link, which would let them stay once guests are turned away", async ({ members }) => {
+    const guest = await members.signIn("Mallory");
+    await openMembership(guest.page);
+    await expect(guest.page.getByText("Only the people administrators invite can join.")).toBeVisible();
+    await expect(guest.page.getByRole("textbox", { name: "Share to invite more people" })).toHaveCount(0);
   });
 });
 

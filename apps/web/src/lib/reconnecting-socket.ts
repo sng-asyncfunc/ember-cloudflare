@@ -45,12 +45,13 @@ export interface ReconnectingSocketOptions {
   deploySpreadMs?: readonly [number, number];
 }
 
-export interface ReconnectingSocket {
+/** A socket that sends `Frame`s: a room's or the workspace's, unless it's said to be another's, as a huddle's is. */
+export interface ReconnectingSocket<Frame = ClientFrame> {
   /**
    * Sends `frame` once the server has let the socket in, saying whether it did. Until then a frame could
    * overtake those the owner is keeping to send once it's in, or go to a server about to refuse it.
    */
-  send(frame: ClientFrame): boolean;
+  send(frame: Frame): boolean;
   /**
    * Says the server has let the connection in, as a room's welcome does: the page is online again, the
    * socket sends, and the next close starts the back-off over. A server that closes a socket as soon as
@@ -132,7 +133,7 @@ function replay(socket: WebSocket, heard: Event[]) {
  * 25 seconds and reconnects when a ping goes unanswered, and it's checked again when the tab is shown or
  * the network comes back, as ActionCable's ConnectionMonitor checks for a stale one.
  */
-export function reconnectingSocket(options: ReconnectingSocketOptions): ReconnectingSocket {
+export function reconnectingSocket<Frame = ClientFrame>(options: ReconnectingSocketOptions): ReconnectingSocket<Frame> {
   let stopped = false;
   let ws: WebSocket | null = null;
   let attempt = 0;

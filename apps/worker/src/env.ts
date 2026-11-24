@@ -1,4 +1,6 @@
+import type { AppConnector } from "./apps/connector";
 import type { ChatRoom } from "./chat-room";
+import type { OutsideAi } from "./outside/endpoint";
 import type { PasswordHasher } from "./passwords";
 import type { SearchIndex } from "./search-index";
 import type { Unfurler } from "./unfurl";
@@ -13,6 +15,8 @@ export interface Env {
   PASSWORD_HASHER: DurableObjectNamespace<PasswordHasher>;
   UNFURLER: DurableObjectNamespace<Unfurler>;
   SEARCH_INDEX: DurableObjectNamespace<SearchIndex>;
+  APP_CONNECTOR: DurableObjectNamespace<AppConnector>;
+  OUTSIDE_AI: DurableObjectNamespace<OutsideAi>;
   /** Only bound when D1 is configured in wrangler.jsonc. */
   DB?: D1Database;
   /**
@@ -20,6 +24,13 @@ export interface Env {
    * answers 503 and a file's address 404.
    */
   FILES?: R2Bucket;
+  /**
+   * Cloudflare Images, which makes the preview of a picture that came without one, as from a bot or a
+   * browser that couldn't read it, where its message would otherwise show it as a file: one over 5 MiB,
+   * or that not every browser shows (files/previews.ts). It makes 5,000 a month free. Unbound, or past
+   * what the account's plan makes, such a picture shows as a file.
+   */
+  IMAGES?: ImagesBinding;
   STORAGE_BACKEND: StorageBackend;
   /**
    * Comma-separated addresses of rooms from before the Workspace kept a list, which it registers as
@@ -35,9 +46,15 @@ export interface Env {
   /** What the Set up Ember form suggests for their email address in place of "kevin@kevinrose.com". */
   EMBER_SETUP_EMAIL_PLACEHOLDER?: string;
   /**
-   * 64 lowercase hex characters (`openssl rand -hex 32`) that the deploy's setup link carries, which
-   * is what lets its holder set Ember up (setup.ts). `pnpm run deploy` makes one for a Worker that has
-   * none. Unset, setup is closed, except over loopback, where `wrangler dev` serves.
+   * The setup password, which the Set up Ember page asks for, so that only whoever deployed Ember sets
+   * it up (setup.ts). Deploy to Cloudflare's form asks the deployer to make one up. With neither it nor
+   * EMBER_SETUP_TOKEN, setup is closed, except over loopback, where `wrangler dev` serves.
+   */
+  EMBER_SETUP_PASSWORD?: string;
+  /**
+   * 64 lowercase hex characters (`openssl rand -hex 32`) that the setup link a deploy prints carries,
+   * which also lets its holder set Ember up. `pnpm run deploy` makes one for a Worker that has neither it
+   * nor a setup password. Set to anything else, it counts as a setup password.
    */
   EMBER_SETUP_TOKEN?: string;
   /**
@@ -47,9 +64,10 @@ export interface Env {
   EMBER_RECOVERY_TOKEN?: string;
   /**
    * The address of the Memberful site whose members may join and sign in, such as
-   * https://example.memberful.com, once an administrator turns Memberful on (memberful.ts). Without it,
-   * or either of the two keys of the site's custom app below, Memberful can't be turned on, and nobody
-   * signs in with it.
+   * https://example.memberful.com, once an administrator turns Memberful on (memberful.ts). With the two
+   * keys of the site's custom app below, it takes the place of the site and every key an administrator
+   * gives in Set up Memberful, and the API key and webhook's secret below with it. Unless all three are
+   * set, Ember has only those.
    */
   MEMBERFUL_URL?: string;
   /** The OAuth identifier of the Memberful site's custom app, a server-side one. */
@@ -65,6 +83,17 @@ export interface Env {
   MEMBERFUL_API_KEY?: string;
   /** The secret Memberful signs its webhooks to `/webhooks/memberful` with, which its Webhooks settings show. */
   MEMBERFUL_WEBHOOK_SECRET?: string;
+  /**
+   * The issuer of an OpenID Connect provider whose people may join and sign in once an administrator
+   * turns single sign-on on (sso.ts), such as https://example.zitadel.cloud, and the client ID and secret
+   * of the app registered there for Ember. All three together take the place of any an administrator
+   * gives on the Single sign-on card, which still sets what the sign-in page calls the provider, and
+   * whom it lets in.
+   */
+  SSO_ISSUER?: string;
+  SSO_CLIENT_ID?: string;
+  /** That app's client secret, which never leaves the Worker and the Workspace. */
+  SSO_CLIENT_SECRET?: string;
   /**
    * The site key of a Cloudflare Turnstile widget, whose check the open sign-up form shows, and the forms
    * that ask Ember to email a link to join or a code to reset a password, to check that whoever fills
@@ -92,11 +121,29 @@ export interface Env {
   /** Where Resend's API is, for the browser tests' stand-in, which only a loopback address can be. */
   RESEND_API_URL?: string;
   /**
+   * The ID of the Cloudflare account the Worker is deployed to, which a Worker can't learn by itself:
+   * `pnpm run deploy` gives it, and Set up Ember AI fills it in for administrators.
+   */
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  /**
    * Where Cloudflare's API is, which Ember AI asks AI Gateway through, for the browser tests' stand-in,
    * which only a loopback address can be: `http://127.0.0.1:8793` has Ember ask
    * `http://127.0.0.1:8793/accounts/<id>/ai/v1/...` (assistant/gateway.ts).
    */
   AI_GATEWAY_URL?: string;
+  /**
+   * Where Ember reads the models file, which lists the models it offers besides Workers AI's
+   * (docs/models.md): unset, the one on Ember's main branch, or else an https address, or the browser
+   * tests' stand-in's at a loopback one, or nowhere, when it's blank, so that Ember offers only the file
+   * its release shipped with.
+   */
+  EMBER_MODELS_URL?: string;
+  /**
+   * Where the Realtime SFU's API is, which huddles run through, for the browser tests' stand-in, which only
+   * a loopback address can be: `http://127.0.0.1:8794` has Ember ask
+   * `http://127.0.0.1:8794/v1/apps/<id>/...` (huddles/sfu.ts).
+   */
+  REALTIME_SFU_URL?: string;
   /**
    * The public half of the P-256 key pair that signs push notifications (VAPID): the point, compressed
    * or not, in URL-safe Base64. `pnpm vapid:keys` makes a pair. Without both halves, or with a pair that
@@ -115,6 +162,16 @@ export interface Env {
   APP_VERSION?: string;
   /** The commit deployed, which stands in for the version when APP_VERSION isn't set. */
   GIT_REVISION?: string;
+  /**
+   * The GitHub repository of the copy of Ember deployed, as `owner/name`, which `pnpm run deploy` gives
+   * where git's origin is a copy on GitHub, with GIT_BRANCH, the branch that deploys, UPDATE_WORKFLOW,
+   * "true" where the copy has the Update Ember workflow, and BETA_WORKFLOW, "true" where it has the beta
+   * workflow: General's release card links to running each, or to adding it.
+   */
+  GITHUB_REPOSITORY?: string;
+  GIT_BRANCH?: string;
+  UPDATE_WORKFLOW?: string;
+  BETA_WORKFLOW?: string;
   /**
    * Any value but a blank one lets plain HTTP through rather than redirecting it to HTTPS, and leaves
    * out HSTS. Loopback addresses, where `wrangler dev` serves, never need it.

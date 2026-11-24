@@ -1,7 +1,7 @@
 // Checks a deployed Worker without signing in: /api/health answers once SESSION_SECRET is set and
 // the Workspace and a room's Durable Object both read their storage, the app's page loads through
 // the Worker, an address with no page answers Campfire's 404 page, the API asks for sign-in, and
-// whether Ember is set up yet, or waits for the setup link the deploy printed.
+// whether Ember is set up yet, or waits for its setup password or the setup link the deploy printed.
 // The Preview workflow runs it after each deploy; it works against `pnpm dev` too:
 //
 //   node apps/worker/scripts/check-deploy.ts http://localhost:8787
@@ -61,7 +61,10 @@ async function checkSignInRequired(baseUrl: string): Promise<void> {
   if (response.status !== 401) throw new Error(`/api/me answered ${response.status} without a session, not 401`);
 }
 
-/** Whether Ember is set up yet, and until it is, what setting it up takes: the deploy's setup link, which a Worker without a setup token can't have. */
+/**
+ * Whether Ember is set up yet, and until it is, what setting it up takes: the Worker's setup password, or
+ * the deploy's setup link, which nobody can use while the Worker has neither.
+ */
 async function checkSetup(baseUrl: string): Promise<{ fine: boolean; said: string }> {
   const response = await fetch(new URL("/api/bootstrap", baseUrl), { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`/api/bootstrap answered ${response.status}`);
@@ -69,10 +72,15 @@ async function checkSetup(baseUrl: string): Promise<{ fine: boolean; said: strin
   const link = `${new URL("/first_run", baseUrl).href}#token=<the token>`;
   // `wrangler secret put` asks for the value, so the person sees the token they make, which a pipe would hide.
   const newToken = "make one with openssl rand -hex 32 and give it to the Worker with wrangler secret put EMBER_SETUP_TOKEN (plus its --name, if it isn't wrangler.jsonc's), which asks for it";
+  const putPassword = "wrangler secret put EMBER_SETUP_PASSWORD (plus its --name, if it isn't wrangler.jsonc's), which asks for it";
   if (setup === "complete") return { fine: true, said: "Ember is set up" };
+  if (setupAccess === "password") return { fine: true, said: `Setup is waiting for the Worker's setup password at ${new URL("/first_run", baseUrl).href}` };
   if (setupAccess === "link") return { fine: true, said: `Setup is waiting for the setup link the deploy printed (if it's lost, ${newToken}, then open ${link})` };
   if (setupAccess === "open") return { fine: true, said: "Setup is waiting, open to whoever is here" };
-  return { fine: false, said: `Setup is waiting, and nobody can do it: the Worker has no EMBER_SETUP_TOKEN. Deploy it with pnpm run deploy, which makes one and prints the link, or ${newToken}, then open ${link}` };
+  return {
+    fine: false,
+    said: `Setup is waiting, and nobody can do it: the Worker has no setup password or EMBER_SETUP_TOKEN. Give it a setup password with ${putPassword}, or deploy it with pnpm run deploy, which makes a token and prints the link`,
+  };
 }
 
 async function check(baseUrl: string): Promise<void> {

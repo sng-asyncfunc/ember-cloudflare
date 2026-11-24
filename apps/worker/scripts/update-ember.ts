@@ -10,7 +10,11 @@
 // pull request whose merge deploys the update (docs/self-hosting.md#updating). Without --publish, as
 // for a copy on GitLab, run it in a clone of the copy, then push the branch it makes:
 //
-//   node apps/worker/scripts/update-ember.ts [--publish]
+//   node apps/worker/scripts/update-ember.ts [--publish] [--beta]
+//
+// Ember's betas, such as v1.2.0-beta.1, which come before its releases, come only to a copy that asks
+// for one, with --beta or the workflow's box for it, and to one that runs a beta already, which is
+// brought the betas after it until a release passes it (docs/self-hosting.md#betas).
 
 import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -18,6 +22,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { dataOf, type JsoncString, stringsOf } from "./jsonc.ts";
 
 /** Ember's repository, where its releases are. */
 const EMBER = "https://github.com/NYLLON-SOFTWARE/ember-cloudflare";
@@ -29,33 +34,56 @@ const EMBER_REPOSITORY = process.env.EMBER_REPOSITORY || `${EMBER}.git`;
  */
 const EMBER_REFS = "refs/ember/";
 const EMBER_MAIN = `${EMBER_REFS}main`;
-const RELEASE_TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
+/** A release's tag, such as v1.2.3, or a beta's of it, such as v1.2.3-beta.4, which comes before the release. */
+const RELEASE_TAG = /^v(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/;
 /**
  * What names the release an update brought: the trailer in its commit's message, or the title of
  * its pull request, which a squash merge may keep alone.
  */
-const RELEASE_NAMED = /^(?:Ember-Release: |Update Ember to )(v\d+\.\d+\.\d+)\b/gm;
-const UPDATE_TITLE = /^Update Ember to v\d+\.\d+\.\d+$/;
+const RELEASE_NAMED = /^(?:Ember-Release: |Update Ember to )(v\d+\.\d+\.\d+(?:-beta\.\d+)?)\b/gm;
+const UPDATE_TITLE = /^Update Ember to v\d+\.\d+\.\d+(?:-beta\.\d+)?$/;
+/** The release that an update's branch, update-ember/v1.2.3, or its issue's title, Update Ember to v1.2.3, offers. */
+const OFFERED = /^(?:update-ember\/|Update Ember to )(v\d+\.\d+\.\d+(?:-beta\.\d+)?)$/;
 /** The trailer an update's commit has for each conflict git couldn't mark, which nothing in its file shows. */
 const NOTED_CONFLICT = /^Ember-Conflict: (.+)$/gm;
 /** A workflow's token can't change workflows, so a published update leaves the copy's as they are. */
 const WORKFLOWS = ".github/workflows";
 const UPDATE_WORKFLOW = `${WORKFLOWS}/update-ember.yml`;
-/** The Worker's settings, where Deploy to Cloudflare names the deployer's Worker and bucket. */
+/** The Worker's settings, where Deploy to Cloudflare writes what the deployer chose in its form. */
 const WRANGLER = "wrangler.jsonc";
-/** Where in wrangler.jsonc a bucket's name and binding are, by the bucket's place in the list. */
-const BUCKET_NAME = /^r2_buckets\.(\d+)\.bucket_name$/;
-const BUCKET_BINDING = /^r2_buckets\.(\d+)\.binding$/;
+/** What Deploy to Cloudflare changes in what it copies: it writes names into the Worker's settings and the package's, and leaves out .github. */
+const BUTTONS_CHANGES = [WRANGLER, "package.json", ".github"];
+/** The settings Deploy to Cloudflare's form writes outside any binding: the Worker's name, and where its messages live. */
+const DEPLOYERS_SETTINGS = ["name", "vars.STORAGE_BACKEND"];
+/**
+ * The members of a binding in each list whose values Deploy to Cloudflare's form writes, each with the one
+ * the button adds it after when the file lacks it: a bucket's preview bucket after the bucket's name, and
+ * the id of the database it makes after the database's name.
+ */
+const DEPLOYERS_MEMBERS: Record<string, Record<string, string | null>> = {
+  r2_buckets: { bucket_name: null, preview_bucket_name: "bucket_name" },
+  d1_databases: { database_name: null, database_id: "database_name", preview_database_id: "database_id" },
+};
+/** Where a binding's member is in wrangler.jsonc, by the binding's place in its list, such as `r2_buckets.0.bucket_name`. */
+const BINDING_MEMBER = /^(\w+)\.(\d+)\.(\w+)$/;
+/** A binding's member as `namesIn` names it, by the binding in place of its place: `r2_buckets.FILES.bucket_name`. */
+const NAMED_MEMBER = /^(\w+)\.(\w+)\.(\w+)$/;
 /** Where Ember says which release it is: a release's version is the one there. */
 const VERSION_FILE = "apps/worker/package.json";
 /** What GitHub answers a workflow that may not open pull requests, as a new repository's may not. */
 const PULL_REQUESTS_NOT_PERMITTED = /not permitted to create or approve pull requests/i;
+/**
+ * Who gh says opened what a workflow opens with the token GitHub gives it, as this one's issues are: it
+ * opens one only on the answer above, which GitHub gives that token alone. No person's login has a slash.
+ */
+const WORKFLOWS_AUTHOR = "app/github-actions";
 /** The first git whose merge-tree takes --merge-base. */
 const GIT_NEEDED = [2, 40, 0];
 
 interface Release {
   tag: string;
   commit: string;
+  /** Its numbers, then its beta's, which is Infinity for a release, as it comes after its betas. */
   version: number[];
 }
 
@@ -102,7 +130,20 @@ const gitSays = (args: string[]) => run("git", args).status === 0;
 const isAncestor = (older: string, newer: string) => gitSays(["merge-base", "--is-ancestor", older, newer]);
 const lastLine = (output: string) => output.trim().split("\n").at(-1) ?? "";
 
-const compareVersions = (a: number[], b: number[]) => a[0]! - b[0]! || a[1]! - b[1]! || a[2]! - b[2]!;
+/** Orders versions by their numbers, first to last, so that a beta, whose last is its number, comes before its release. */
+function compareVersions(a: number[], b: number[]): number {
+  const at = a.findIndex((number, place) => number !== b[place]);
+  return at === -1 ? 0 : a[at]! < b[at]! ? -1 : 1;
+}
+
+/** A tag's version, as `Release` has it, if it names one. */
+function versionOf(tag: string): number[] | undefined {
+  const [, ...numbers] = RELEASE_TAG.exec(tag) ?? [];
+  return numbers.length > 0 ? numbers.map((number) => (number === undefined ? Infinity : Number(number))) : undefined;
+}
+
+const isBeta = (version: number[]) => version[3] !== Infinity;
+const kindOf = (release: Release) => (isBeta(release.version) ? "beta" : "release");
 
 function requireGit(): void {
   const version = git(["--version"]);
@@ -116,7 +157,7 @@ function fetchEmber(): void {
   git(["fetch", "--quiet", "--no-tags", "--force", EMBER_REPOSITORY, `+refs/heads/main:${EMBER_MAIN}`, `+refs/tags/v*:${EMBER_REFS}v*`]);
 }
 
-/** Ember's releases, oldest first: its tags named for a version. */
+/** Ember's releases and betas, oldest first: its tags named for a version. */
 function releases(): Release[] {
   const listing = git(["for-each-ref", "--format=%(refname:lstrip=2) %(objectname) %(*objectname)", EMBER_REFS]);
   return listing
@@ -124,31 +165,56 @@ function releases(): Release[] {
     .flatMap((line) => {
       // A lightweight tag's object is its commit; an annotated tag's commit is the one it points at.
       const [tag = "", object = "", tagged] = line.split(" ");
-      const version = RELEASE_TAG.exec(tag)?.slice(1).map(Number);
+      const version = versionOf(tag);
       return version ? [{ tag, commit: tagged || object, version }] : [];
     })
     .sort((a, b) => compareVersions(a.version, b.version));
 }
 
 /**
- * The commit of Ember's main that Deploy to Cloudflare copied: the last one before the copy's first
- * commit was made, since that commit's date is all that ties the copy to Ember's history.
+ * The commit of Ember's that Deploy to Cloudflare copied. A copy of a release or a beta, as a button
+ * that names its tag makes, holds just what the tag does but for what the button changes, so it's the
+ * commit of the tag that the copy's first commit says it's at. Any other is a copy of Ember's main,
+ * made from the last commit there before the copy's first was made, since that commit's date is all
+ * that ties the copy to Ember's history.
  */
-function madeFrom(): string | undefined {
+function madeFrom(all: Release[]): string | undefined {
   const roots = git(["rev-list", "--max-parents=0", "HEAD"]).split("\n");
-  const dates = git(["show", "--no-patch", "--format=%ct %cI", ...roots]).split("\n").map((line) => line.split(" "));
-  const [, created] = dates.sort(([a], [b]) => Number(a) - Number(b))[0]!;
+  const dates = git(["show", "--no-patch", "--format=%ct %cI %H", ...roots]).split("\n").map((line) => line.split(" "));
+  const [, created, first = ""] = dates.sort(([a], [b]) => Number(a) - Number(b))[0]!;
+  const tagged = all.find((release) => release.tag === tagAt(first));
+  if (tagged && holdsTheSame(first, tagged.commit)) return tagged.commit;
   return git(["rev-list", "-1", "--first-parent", `--before=${created}`, EMBER_MAIN]) || undefined;
 }
 
-/** The version the copy's code is at, as Ember's own file says, if it says one. */
-function versionHere(): number[] | undefined {
+/** Whether the copy's commit `copied` holds just what Ember's `commit` does, but for what Deploy to Cloudflare changes. */
+const holdsTheSame = (copied: string, commit: string) =>
+  gitSays(["diff", "--quiet", commit, copied, "--", ...BUTTONS_CHANGES.map((changed) => `:(top,exclude)${changed}`)]);
+
+/** The tag of the version that Ember's own file says `revision` is at, such as v1.2.3, if it says one. */
+function tagAt(revision: string): string | undefined {
   try {
-    const { version } = JSON.parse(fileAt("HEAD", VERSION_FILE) ?? "") as { version?: unknown };
-    return RELEASE_TAG.exec(`v${String(version)}`)?.slice(1).map(Number);
+    const { version } = JSON.parse(fileAt(revision, VERSION_FILE) ?? "") as { version?: unknown };
+    return versionOf(`v${String(version)}`) ? `v${String(version)}` : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** The version the copy's code is at, as Ember's own file says, if it says one. */
+const versionHere = () => versionOf(tagAt("HEAD") ?? "");
+
+/**
+ * The release to bring the copy up to: Ember's newest, or with `betas` asked for, its newest beta, where
+ * that's newer. A copy that runs a beta is brought the betas after it too, until a release passes it,
+ * which it's brought instead, and then releases alone.
+ */
+function newestFor(all: Release[], betas: boolean): Release | undefined {
+  const newestRelease = all.filter((release) => !isBeta(release.version)).at(-1);
+  const here = versionHere();
+  const passed = here !== undefined && newestRelease !== undefined && compareVersions(newestRelease.version, here) > 0;
+  const onBeta = here !== undefined && isBeta(here) && !passed;
+  return betas || onBeta ? all.at(-1) : newestRelease;
 }
 
 /**
@@ -169,7 +235,7 @@ function releasesBrought(all: Release[]): Release[] {
  */
 function baseOf(newest: Release, all: Release[]): string {
   const shared = run("git", ["merge-base", "HEAD", newest.commit]);
-  const parted = shared.status === 0 ? shared.stdout.trim() : madeFrom();
+  const parted = shared.status === 0 ? shared.stdout.trim() : madeFrom(all);
   const candidates = [parted, ...releasesBrought(all).map((release) => release.commit)];
   const known = candidates.filter((commit) => commit !== undefined);
   if (known.length === 0) throw new Error("This copy's first commit is older than Ember's, so it can't be a copy of Ember.");
@@ -240,118 +306,87 @@ function fileAt(revision: string, file: string): string | undefined {
   return result.status === 0 ? result.stdout : undefined;
 }
 
-interface Token {
-  text: string;
-  start: number;
-  kind: "string" | "punctuation" | "scalar" | "comment" | "space";
-}
-
-/** JSONC's tokens: JSON's, and the comments between them. */
-function tokensOf(text: string): Token[] {
-  const tokens: Token[] = [];
-  for (let at = 0; at < text.length; ) {
-    const start = at;
-    let kind: Token["kind"];
-    if (text[at] === '"') {
-      for (at++; at < text.length && text[at] !== '"'; at += text[at] === "\\" ? 2 : 1);
-      at++;
-      kind = "string";
-    } else if (text.startsWith("//", at) || text.startsWith("/*", at)) {
-      const end = text.startsWith("//", at) ? text.indexOf("\n", at) : text.indexOf("*/", at + 2) + 2;
-      at = end > start ? end : text.length;
-      kind = "comment";
-    } else if ("{}[]:,".includes(text[at]!)) {
-      at++;
-      kind = "punctuation";
-    } else {
-      kind = /\s/.test(text[at]!) ? "space" : "scalar";
-      const sameKind = kind === "space" ? /\s/ : /[^\s{}[\]:,"/]/;
-      do at++;
-      while (at < text.length && sameKind.test(text[at]!));
-    }
-    tokens.push({ text: text.slice(start, at), start, kind });
-  }
-  return tokens.filter((token) => token.kind !== "comment" && token.kind !== "space");
-}
-
-/** A JSONC file's data, without its comments or the commas it may have before a closing bracket. */
-function dataOf(text: string): unknown {
-  const tokens = tokensOf(text);
-  const json = tokens.filter((token, at) => !(token.text === "," && "}]".includes(tokens[at + 1]?.text || "}")));
-  return JSON.parse(json.map((token) => token.text).join(""));
-}
-
-/** Each string value in a JSONC file, with its path, such as `name` or `r2_buckets.0.bucket_name`. */
-function stringsOf(text: string): { path: string; start: number; end: number; value: string }[] {
-  const strings = [];
-  const open: { kind: string; segment: string; key?: string; index: number; expectingKey: boolean }[] = [];
-  const segmentHere = () => {
-    const container = open.at(-1);
-    return container?.kind === "[" ? String(container.index) : (container?.key ?? "");
-  };
-  for (const token of tokensOf(text)) {
-    const container = open.at(-1);
-    if (token.text === "{" || token.text === "[") {
-      open.push({ kind: token.text, segment: segmentHere(), index: 0, expectingKey: token.text === "{" });
-    } else if (token.text === "}" || token.text === "]") {
-      open.pop();
-    } else if (container && token.text === ":") {
-      container.expectingKey = false;
-    } else if (container && token.text === ",") {
-      container.index++;
-      container.expectingKey = container.kind === "{";
-    } else if (token.kind === "string" && container?.expectingKey) {
-      container.key = JSON.parse(token.text) as string;
-    } else if (token.kind === "string") {
-      const path = [...open.slice(1).map((outer) => outer.segment), segmentHere()].join(".");
-      strings.push({ path, start: token.start, end: token.start + token.text.length, value: JSON.parse(token.text) as string });
-    }
-  }
-  return strings;
-}
-
 /**
- * The names Deploy to Cloudflare writes into wrangler.jsonc, and where they are, by what they name:
- * the Worker, and each bucket by its binding, which stays the bucket's wherever it moves in the list.
+ * The names Deploy to Cloudflare writes into wrangler.jsonc, and where they are, by their path, with each
+ * binding's place in its list given as the binding, which stays its resource's wherever it moves in the
+ * list: `name`, `vars.STORAGE_BACKEND`, `r2_buckets.FILES.bucket_name`, `d1_databases.DB.database_id`.
  */
-function namesIn(text: string): Map<string, { start: number; end: number; value: string }> {
+function namesIn(text: string): Map<string, JsoncString> {
   const strings = stringsOf(text);
   const bindings = new Map<string, string>();
   for (const { path, value } of strings) {
-    const place = BUCKET_BINDING.exec(path)?.[1];
-    if (place !== undefined) bindings.set(place, value);
+    const [, list, place, member] = BINDING_MEMBER.exec(path) ?? [];
+    if (member === "binding") bindings.set(`${list}.${place}`, value);
   }
-  const names = new Map<string, { start: number; end: number; value: string }>();
+  const names = new Map<string, JsoncString>();
   for (const string of strings) {
-    const place = BUCKET_NAME.exec(string.path)?.[1];
-    const binding = place === undefined ? undefined : bindings.get(place);
-    if (string.path === "name") names.set("the Worker", string);
-    else if (binding !== undefined) names.set(`the bucket bound to ${binding}`, string);
+    const [, list, place, member] = BINDING_MEMBER.exec(string.path) ?? [];
+    const binding = bindings.get(`${list}.${place}`);
+    if (DEPLOYERS_SETTINGS.includes(string.path)) names.set(string.path, string);
+    else if (binding !== undefined && DEPLOYERS_MEMBERS[list!]?.[member!] !== undefined) names.set(`${list}.${binding}.${member}`, string);
   }
   return names;
 }
 
 const deployersNames = (text: string) => new Map([...namesIn(text)].map(([what, { value }]): [string, string] => [what, value]));
 
-/** `text` with the names of what `names` names set to theirs. */
-function withNames(text: string, names: Map<string, string>): string {
-  const named = [...namesIn(text)].filter(([what]) => names.has(what)).sort(([, a], [, b]) => a.start - b.start);
-  return named.reduceRight((result, [what, { start, end }]) => result.slice(0, start) + JSON.stringify(names.get(what)) + result.slice(end), text);
+/**
+ * Where in a file whose names are `here` the button would add the member that `what` names, which the file
+ * lacks: after the nearest member before it that the file has, as a preview bucket goes after its bucket's
+ * name. Anything else, and a member whose binding the file lacks, goes nowhere.
+ */
+function besideWhat(what: string, here: Map<string, JsoncString>): JsoncString | undefined {
+  const [, list, binding, member] = NAMED_MEMBER.exec(what) ?? [];
+  for (let before = DEPLOYERS_MEMBERS[list!]?.[member!]; before; before = DEPLOYERS_MEMBERS[list!]![before]) {
+    const beside = here.get(`${list}.${binding}.${before}`);
+    if (beside) return beside;
+  }
+  return undefined;
 }
 
 /**
- * Ember's wrangler.jsonc at `release` with the copy's names for its Worker and bucket, when those are
- * all the copy changed there, however Deploy to Cloudflare laid the file out: the names sit beside
- * lines Ember changes, such as their comments, where a merge would leave conflict markers. A name
- * whose binding the release lacks, as when Ember renames one, is the merge's to place.
+ * `text` with the names of what `names` names set to theirs, and each member it lacks added after the one
+ * Deploy to Cloudflare adds it after, as the button writes it.
+ */
+function withNames(text: string, names: Map<string, string>): string {
+  const here = namesIn(text);
+  const edits = [...names].flatMap(([what, name]) => {
+    const named = here.get(what);
+    if (named) return [{ start: named.start, end: named.end, text: JSON.stringify(name) }];
+    const beside = besideWhat(what, here);
+    return beside ? [{ start: beside.end, end: beside.end, text: `,${JSON.stringify(NAMED_MEMBER.exec(what)![3])}: ${JSON.stringify(name)}` }] : [];
+  });
+  // From the end back, so each edit's place is still where it was; members added after the same one go
+  // in last first, which leaves them in the order `names` has them.
+  return edits
+    .map((edit, order) => ({ ...edit, order }))
+    .sort((a, b) => b.start - a.start || b.order - a.order)
+    .reduce((result, edit) => result.slice(0, edit.start) + edit.text + result.slice(edit.end), text);
+}
+
+/** `text` without the members that name what `whats` name, nor the comma after each. */
+function withoutNames(text: string, whats: string[]): string {
+  const here = namesIn(text);
+  const members = whats.flatMap((what) => here.get(what) ?? []).sort((a, b) => b.member - a.member);
+  return members.reduce((result, { member, end }) => result.slice(0, member) + result.slice(end).replace(/^\s*,/, ""), text);
+}
+
+/**
+ * Ember's wrangler.jsonc at `release` with what the copy's deployer chose in Deploy to Cloudflare's form,
+ * its Worker's, bucket's and database's names and where its messages live, when those are all the copy
+ * changed there, however the button laid the file out: they sit beside lines Ember changes, such as their
+ * comments, where a merge would leave conflict markers. What the button adds, a bucket's preview bucket and
+ * the id of the database it made, counts among them. A name whose binding the release lacks, as when
+ * Ember renames one, is the merge's to place.
  */
 function wranglerWithCopysNames(base: string, release: Release): string | undefined {
   const [ours, was, now] = ["HEAD", base, release.commit].map((revision) => fileAt(revision, WRANGLER));
   if (ours === undefined || was === undefined || now === undefined) return undefined;
   try {
     const names = deployersNames(ours);
-    const onlyNamed = isDeepStrictEqual(dataOf(withNames(ours, deployersNames(was))), dataOf(was));
-    const placed = [...names.keys()].every((what) => namesIn(now).has(what));
+    const added = [...names.keys()].filter((what) => !namesIn(was).has(what));
+    const onlyNamed = isDeepStrictEqual(dataOf(withoutNames(withNames(ours, deployersNames(was)), added)), dataOf(was));
+    const placed = [...names.keys()].every((what) => namesIn(now).has(what) || besideWhat(what, namesIn(now)) !== undefined);
     return onlyNamed && placed ? withNames(now, names) : undefined;
   } catch {
     // Not JSONC that this reads, so it's the merge's to make.
@@ -397,6 +432,13 @@ function details(update: Update): string[] {
     `What's new: ${update.releases.map(releaseLink).join(", ")}, and [every change](${EMBER}/compare/${base.commit}...${release.tag}). ` +
       "Whatever your copy changed stays as it is, such as your Worker's and bucket's names, and Ember's tables bring themselves up to date as each opens after the deploy.",
   ];
+  if (isBeta(release.version)) {
+    lines.push(
+      "",
+      "**This is a beta** of Ember's next release, which a copy is offered only when it asks for one or runs one already: " +
+        "the betas after it come the same way, then the release, and from then on releases alone.",
+    );
+  }
   if (update.conflicts.length > 0) {
     lines.push(
       "",
@@ -448,21 +490,48 @@ function listed<T>(args: string[]): T[] {
   return result.status === 0 ? (JSON.parse(result.stdout) as T[]) : [];
 }
 
+/** A pull request as gh lists it, with whether its branch is in another repository than the copy's, as a fork's is. */
+interface ListedPull {
+  headRefName: string;
+  isCrossRepository?: boolean;
+}
+
+/** An issue as gh lists it, with who opened it. */
+interface ListedIssue {
+  title: string;
+  author?: { login?: string };
+}
+
 /**
- * Closes the pull requests and issues for updates the copy needs no more: all of them once it has
- * Ember's newest release, or those for older releases than the one `offered` at `where`.
+ * Whether a pull request's branch is in the copy's own repository, where only those who may push to it
+ * can make or change one. Anyone can open one from a fork, with a branch there named as an update's.
  */
-function closeStale(offered?: { update: Update; where: string }): void {
-  const release = offered?.update.release;
-  const reason = offered ? `Ember ${offered.update.release.tag} is out, so ${offered.where} brings this copy up to it instead.` : "This copy has Ember's newest release now.";
-  for (const pull of listed<{ number: number; headRefName: string }>(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,headRefName"])) {
-    if (pull.headRefName.startsWith("update-ember/") && (!release || pull.headRefName !== branchOf(release))) {
+const isFromCopy = (pull: ListedPull) => pull.isCrossRepository === false;
+
+/** Whether an issue is one this workflow opened. Anyone who may open one can give it an update's title. */
+const isWorkflows = (issue: ListedIssue) => issue.author?.login === WORKFLOWS_AUTHOR;
+
+/**
+ * Closes the pull requests and issues for updates the copy needs no more: those for older releases
+ * than `newest`, which `where` offers, or once the copy has `newest`, those up to it. One for a newer
+ * beta, which the copy asked for, stays open until a release passes it, and so does anyone else's
+ * that looks like an update's, which isn't this workflow's to close.
+ */
+function closeStale(newest: Release, where?: string): void {
+  const reason = where ? `Ember ${newest.tag} is out, so ${where} brings this copy up to it instead.` : `This copy has Ember's newest ${kindOf(newest)} now.`;
+  const isStale = (offer: string) => {
+    const version = versionOf(OFFERED.exec(offer)?.[1] ?? "");
+    const order = version ? compareVersions(version, newest.version) : -1;
+    return where ? order < 0 : order <= 0;
+  };
+  for (const pull of listed<ListedPull & { number: number }>(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,headRefName,isCrossRepository"])) {
+    if (pull.headRefName.startsWith("update-ember/") && isFromCopy(pull) && isStale(pull.headRefName)) {
       run("gh", ["pr", "close", String(pull.number), "--delete-branch", "--comment", reason]);
     }
   }
-  const issues = listed<{ number: number; title: string }>(["issue", "list", "--state", "open", "--limit", "100", "--json", "number,title"]);
+  const issues = listed<ListedIssue & { number: number }>(["issue", "list", "--state", "open", "--limit", "100", "--json", "number,title,author"]);
   for (const issue of issues) {
-    if (UPDATE_TITLE.test(issue.title) && (!release || issue.title !== titleOf(release))) run("gh", ["issue", "close", String(issue.number), "--comment", reason]);
+    if (UPDATE_TITLE.test(issue.title) && isWorkflows(issue) && isStale(issue.title)) run("gh", ["issue", "close", String(issue.number), "--comment", reason]);
   }
 }
 
@@ -512,12 +581,19 @@ function conflictsOn(branch: string, release: Release): Conflict[] {
   return [...marked.filter((file) => !noted.some((conflict) => conflict.file === file)).map((file) => ({ file })), ...noted];
 }
 
-/** The pull request or issue that offered `release` before, an open one rather than one closed. */
+/**
+ * The pull request or issue that offered `release` before, an open one rather than one closed: a pull
+ * request for the update's branch in the copy's own repository, or an issue this workflow opened, and
+ * no one else's that is named as one.
+ */
 function offerOf(release: Release): { url: string; state: string } | undefined {
   const branch = branchOf(release);
-  const pulls = listed<{ url: string; state: string; headRefName: string }>(["pr", "list", "--head", branch, "--state", "all", "--json", "url,state,headRefName"]);
-  const issues = listed<{ url: string; state: string; title: string }>(["issue", "list", "--state", "all", "--limit", "100", "--json", "url,state,title"]);
-  const offers = [...pulls.filter((pull) => pull.headRefName === branch), ...issues.filter((issue) => issue.title === titleOf(release))];
+  const pulls = listed<ListedPull & { url: string; state: string }>(["pr", "list", "--head", branch, "--state", "all", "--json", "url,state,headRefName,isCrossRepository"]);
+  const issues = listed<ListedIssue & { url: string; state: string }>(["issue", "list", "--state", "all", "--limit", "100", "--json", "url,state,title,author"]);
+  const offers = [
+    ...pulls.filter((pull) => pull.headRefName === branch && isFromCopy(pull)),
+    ...issues.filter((issue) => issue.title === titleOf(release) && isWorkflows(issue)),
+  ];
   return offers.find((offer) => offer.state === "OPEN") ?? offers[0];
 }
 
@@ -530,7 +606,7 @@ function publish(update: Update): void {
   const branch = branchOf(update.release);
   const offer = offerOf(update.release);
   if (offer?.state === "OPEN") {
-    closeStale({ update, where: offer.url });
+    closeStale(update.release, offer.url);
     return report(`${offer.url} offers this copy Ember ${update.release.tag} already.`);
   }
   // Closed, or merged and since reverted: either way, its release is turned down.
@@ -548,7 +624,7 @@ function publish(update: Update): void {
   const opened = run("gh", ["pr", "create", "--base", main, "--head", branch, "--title", title, "--body-file", "-", ...draft], body);
   if (opened.status === 0) {
     const where = lastLine(opened.stdout);
-    closeStale({ update, where });
+    closeStale(update.release, where);
     return report(`Opened ${where}, which brings this copy up to Ember ${update.release.tag}.`);
   }
   if (!PULL_REQUESTS_NOT_PERMITTED.test(opened.stderr)) throw new Error(`gh pr create failed: ${opened.stderr.trim()}`);
@@ -559,12 +635,14 @@ function publish(update: Update): void {
     throw new Error(`gh issue create failed too: ${filed.stderr.trim()}`);
   }
   const where = lastLine(filed.stdout);
-  closeStale({ update, where });
+  closeStale(update.release, where);
   report(`GitHub doesn't let this workflow open pull requests, so ${where} links to the one that brings this copy up to Ember ${update.release.tag}.`);
 }
 
 function update(args: string[]): void {
   const publishing = args.includes("--publish");
+  // The Update Ember workflow's box for a beta, which running it from the Actions tab offers, says so as EMBER_BETA.
+  const betas = args.includes("--beta") || process.env.EMBER_BETA === "true";
   requireGit();
   process.chdir(git(["rev-parse", "--show-toplevel"]));
   if (git(["rev-parse", "--is-shallow-repository"]) === "true") {
@@ -572,12 +650,12 @@ function update(args: string[]): void {
   }
   fetchEmber();
   const all = releases();
-  const newest = all.at(-1);
+  const newest = newestFor(all, betas);
   if (!newest) return report("Ember has no releases yet.");
   const base = baseOf(newest, all);
   if (isAncestor(newest.commit, base)) {
-    if (publishing) closeStale();
-    return report(`This copy has everything in Ember's newest release, ${newest.tag}.`);
+    if (publishing) closeStale(newest);
+    return report(`This copy has everything in Ember's newest ${kindOf(newest)}, ${newest.tag}.`);
   }
   const merged = merge(base, newest);
   const wrangler = wranglerWithCopysNames(base, newest);
@@ -590,7 +668,10 @@ function update(args: string[]): void {
     return report(`Ember ${newest.tag} changes nothing this copy has${workflows.changed ? " but Ember's own workflows" : ""}.`);
   }
   const from = { commit: base, name: nameOf(base, all) };
-  const brought = all.filter((release) => compareVersions(release.version, newest.version) <= 0 && !isAncestor(release.commit, base));
+  // A release brings the releases since the base; a beta, the betas since it too.
+  const brought = all.filter(
+    (release) => compareVersions(release.version, newest.version) <= 0 && !isAncestor(release.commit, base) && (isBeta(newest.version) || !isBeta(release.version)),
+  );
   const result = { release: newest, base: from, releases: brought, commit: commitOf(tree, newest, from, conflicts), conflicts, workflows };
   if (publishing) publish(result);
   else makeBranch(result);

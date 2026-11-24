@@ -21,7 +21,7 @@ async function canSee(request: APIRequestContext, session: Session, roomId: stri
 }
 
 test.describe("Create an open room", () => {
-  test("makes an open room from Rooms and permissions, opens it, and lets everyone in", async ({ members, request }) => {
+  test("makes an open room from Rooms and permissions, opens it, lists it below every other room, and lets everyone in", async ({ members, request }) => {
     const ada = await members.signIn("Ada");
     const rail = ada.page.getByRole("navigation", { name: "Workspace" });
     await expect(rail.getByRole("link", { name: "Home", exact: true })).toHaveAttribute("aria-current", "page");
@@ -44,6 +44,8 @@ test.describe("Create an open room", () => {
     await roomName.press("Enter");
     await expect(ada.page.getByRole("heading", { level: 1, name, exact: true })).toBeVisible();
     await expect(ada.page.getByRole("region", { name: "Rooms" }).getByRole("link", { name })).toHaveAttribute("aria-current", "page");
+    // Below general and random, though its name comes first.
+    await expect(ada.page.getByRole("region", { name: "Rooms" }).getByRole("link")).toHaveText(["#general", "#random", `#${name}`]);
     await ada.connected();
     expect(await canSee(request, await createSession(request, "Grace"), roomIdOf(ada))).toBe(true);
   });
@@ -168,6 +170,29 @@ test.describe("Add and remove private room members", () => {
     await expect(ada.page).toHaveURL(new RegExp(`/rooms/${rooms.general.id}$`));
     await expect(ada.page.getByRole("region", { name: "Rooms" }).getByRole("link", { name: leads.name })).toHaveCount(0);
     expect(await canSee(request, ada.session, leads.id)).toBe(false);
+  });
+});
+
+test.describe("Leave a private room", () => {
+  test("leaves a private room you can't change from its settings once you confirm, which then leaves your sidebar", async ({ members, request, rooms }) => {
+    const ada = await members.signIn(unique("Ada"), { serverRooms: true });
+    const linus = await members.signIn(unique("Linus"), { serverRooms: true });
+    const leads = await createPrivateRoom(request, linus.session, unique("Leads"), [linus.session, ada.session]);
+    await ada.page.goto(`/rooms/closeds/${leads.id}/edit`);
+
+    const asked = new Promise<string>((resolve) =>
+      ada.page.once("dialog", (dialog) => {
+        resolve(dialog.message());
+        void dialog.accept();
+      }),
+    );
+    await ada.page.getByRole("button", { name: `Leave ${leads.name}` }).click();
+    expect(await asked).toBe("Are you sure you want to leave this room? Only someone in it who can change it can add you back.");
+    await expect(ada.page).toHaveURL(new RegExp(`/rooms/${rooms.general.id}$`));
+    await expect(ada.page.getByRole("region", { name: "Rooms" }).getByRole("link", { name: leads.name })).toHaveCount(0);
+    await expect(ada.page.getByRole("alert")).toHaveCount(0);
+    expect(await canSee(request, ada.session, leads.id)).toBe(false);
+    expect(await canSee(request, linus.session, leads.id)).toBe(true);
   });
 });
 

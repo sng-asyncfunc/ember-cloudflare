@@ -1,8 +1,11 @@
-import { HISTORY_PAGE_SIZE, threadPath, type BotAnswer, type BotSettings, type Message, type NewWorkspace, type RoomId, type ServerFrame, type Upload, type User } from "@ember/protocol";
+import { HISTORY_PAGE_SIZE, threadPath, type BotAnswer, type BotSettings, type Message, type NewWorkspace, type RoomId, type SearchResults, type ServerFrame, type Upload, type User } from "@ember/protocol";
+import { botMessagesPath } from "@ember/protocol/bots";
 import { MENTION_CONTENT_TYPE, mentionSgid } from "@ember/richtext";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MESSAGE_GONE } from "../src/chat-room";
+import type { Env } from "../src/env";
 import {
   api,
   connect,
@@ -10,6 +13,7 @@ import {
   cutOff,
   freshDeploy,
   freshRoom,
+  origin,
   post,
   pushBrowser,
   reconnect,
@@ -23,6 +27,7 @@ import {
   signIn,
   startUpload,
   workspaceSql,
+  workspaceStub,
   type Client,
   type PushBrowser,
   type Session,
@@ -68,6 +73,9 @@ async function openThread(client: Socket, parentId: string) {
 /** The ids of `messages`, in order. */
 const idsOf = (messages: Message[]) => messages.map(({ id }) => id);
 
+/** The keys of the files R2 keeps. */
+const storedFiles = async () => (await (env as unknown as Env).FILES!.list({ prefix: "files/" })).objects.map(({ key }) => key);
+
 /** How a message mentioning `person` is written. */
 const mention = (person: Pick<User, "id">) => `<action-text-attachment sgid="${mentionSgid(person.id)}" content-type="${MENTION_CONTENT_TYPE}"></action-text-attachment>`;
 
@@ -84,6 +92,12 @@ const marked = async (room: RoomId) =>
       room,
     )
   ).map((row) => (row as { name: string }).name);
+
+/** Closes `tab`, and waits for room `room` to have let go of its person's sockets, who views nothing of it from then. */
+async function closed(room: RoomId, tab: Client): Promise<void> {
+  tab.close();
+  await vi.waitFor(() => runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => expect(state.getWebSockets(tab.me.id)).toHaveLength(0)));
+}
 
 /** When room `room` was last active, as the sidebar orders DMs by it. */
 const lastMessageAt = async (room: RoomId) => ((await workspaceSql("SELECT last_message_at FROM rooms WHERE id = ?", room)) as [{ last_message_at: string | null }])[0].last_message_at;
@@ -266,7 +280,7 @@ describe("Deleting messages with threads", () => {
     await vi.waitFor(async () => expect(await roomSql(room, "SELECT seq FROM unindexed_messages WHERE room_id = ?", room)).toEqual([]), { timeout: 5_000 });
 
     const response = await api(`/api/searches?q=zeppelin`, { headers: { Cookie: ada.session.cookie } });
-    const { messages } = (await response.json()) as { messages: Message[] };
+    const messages = ((await response.json()) as SearchResults).matches.map(({ message }) => message);
     expect(idsOf(messages)).toEqual([answer.id]);
     expect(messages[0]).toMatchObject({ parentId: parent.id });
     expect(await searchSql("SELECT count(*) AS n FROM search_messages WHERE message_id = ?", parent.id)).toEqual([{ n: 0 }]);
@@ -280,8 +294,8 @@ describe("Deleting messages with threads", () => {
     await caughtUp(ada);
     const found = async () => {
       await vi.waitFor(async () => expect(await roomSql(room, "SELECT seq FROM unindexed_messages WHERE room_id = ?", room)).toEqual([]), { timeout: 5_000 });
-      const response = await api(`/api/searches?q=zeppelin`, { headers: { Cookie: ada.session.cookie } });
-      return ((await response.json()) as { messages: Message[] }).messages;
+      const response = await api(`/api/searches?q=zeppelin&sort=oldest`, { headers: { Cookie: ada.session.cookie } });
+      return ((await response.json()) as SearchResults).matches.map(({ message }) => message);
     };
     expect(await found()).toMatchObject([
       { id: parent.id, thread: { count: 1 } },
@@ -320,6 +334,59 @@ describe("Whom a reply reaches", () => {
     await delivered(room);
     expect(await marked(room)).toContain("Grace");
     expect(await lastMessageAt(room)).toBe(sent.createdAt);
+  });
+
+  it("neither reads the room through a socket that shows a thread apart from its timeline, as a huddle shows its own, nor counts its person as there for what's said in the room", async () => {
+    const room = await freshRoom("apart");
+    const ada = await connect(room, "Ada", { visible: true });
+    const grace = await signIn("Grace");
+    await post(ada, "<p>Plan</p>");
+    await delivered(room);
+    expect(await marked(room)).toContain("Grace");
+
+    // Opening it in a shown tab reads nothing, nor does the tab's coming back into view.
+    const apart = await connect(room, grace, { visible: true, apart: true });
+    apart.send({ type: "presence.visible", visible: true });
+    await settle(apart);
+    await delivered(room);
+    expect(await marked(room)).toContain("Grace");
+
+    // The room's own socket reads it, and once that's closed, what's said next marks it unread again.
+    const tab = await connect(room, grace, { visible: true });
+    await vi.waitFor(async () => expect(await marked(room)).not.toContain("Grace"));
+    tab.close();
+    await sleep(5);
+    await post(ada, "<p>Still on for Friday?</p>");
+    await delivered(room);
+    expect(await marked(room)).toContain("Grace");
+  });
+
+  it("has a reply sent to the room too seen by whoever was viewing the room as it came, or its thread on a socket apart from the room's timeline, though they left before the Workspace heard of it", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const room = await freshRoom("apart");
+    const ada = await connect(room, "Ada", { visible: true });
+    // Grace, Lin and Max have read the room, which Max keeps open.
+    const [gracesTab, linsTab, max] = [await connect(room, "Grace", { visible: true }), await connect(room, "Lin", { visible: true }), await connect(room, "Max", { visible: true })];
+    const parent = await post(ada, "<p>Plan</p>");
+    await delivered(room);
+    for (const tab of [gracesTab, linsTab]) await closed(room, tab);
+    // Whoever made the room has yet to open it.
+    expect(await marked(room)).toEqual(["Host"]);
+
+    // Grace and Lin each have a socket apart from the room's timeline: hers with the thread open, and his with none.
+    const [grace, lin] = [await connect(room, gracesTab.session, { visible: true, apart: true }), await connect(room, linsTab.session, { visible: true, apart: true })];
+    await openThread(grace, parent.id);
+    await settle(lin);
+
+    // The reply comes while the Workspace can't be reached, and Grace and Max leave before it hears.
+    const reconnect = await cutOff(room);
+    await reply(ada, parent, "<p>Everyone</p>", true);
+    for (const tab of [grace, max]) await closed(room, tab);
+    await vi.waitFor(async () => expect(await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => state.storage.getAlarm())).not.toBeNull(), { timeout: 5_000 });
+    await reconnect();
+    await runDurableObjectAlarm(roomStub(room));
+    await delivered(room);
+    expect(await marked(room)).toEqual(["Host", "Lin"]);
   });
 });
 
@@ -395,6 +462,35 @@ describe("Pushing replies", () => {
     await vi.waitFor(() => expect(labels()).toEqual(["ada", "ada", "ada", "grace"]), { timeout: 5_000 });
   });
 
+  it("counts whoever has a thread open on a socket apart from the room's timeline as viewing the thread, while their tab is shown", async () => {
+    const pushed = pushServices();
+    const room = await freshRoom("Launch");
+    const [ada, lin] = [await connect(room, "Ada", { visible: false }), await connect(room, "Lin", { visible: false })];
+    const grace = await signIn("Grace");
+    await subscribe(ada.session, "ada", await pushBrowser());
+    await subscribe(grace, "grace", await pushBrowser());
+    const labels = () => pushed.map(({ label }) => label).sort();
+    const parent = await post(ada, "<p>Launch day?</p>");
+    const apart = await connect(room, grace, { visible: true, apart: true });
+    // Grace follows the thread from her first reply, and is pushed what's said in it, as Ada is, who wrote its message.
+    await reply(apart, parent, "<p>Friday</p>");
+    await reply(lin, parent, "<p>Friday works</p>");
+    await vi.waitFor(() => expect(labels()).toEqual(["ada", "ada", "grace"]), { timeout: 5_000 });
+
+    await openThread(apart, parent.id);
+    await reply(lin, parent, "<p>See you there</p>");
+    await vi.waitFor(() => expect(labels()).toEqual(["ada", "ada", "ada", "grace"]), { timeout: 5_000 });
+    // Nor is one sent to the room too pushed to her, who sees it in the thread.
+    await reply(lin, parent, "<p>All welcome</p>", true);
+    await vi.waitFor(() => expect(labels()).toEqual(["ada", "ada", "ada", "ada", "grace"]), { timeout: 5_000 });
+    // Her tab hidden, she no longer sees what's said there, sent to the room or not.
+    apart.send({ type: "presence.visible", visible: false });
+    await settle(apart);
+    await reply(lin, parent, "<p>Bring the banner</p>");
+    await reply(lin, parent, "<p>And the cake</p>", true);
+    await vi.waitFor(() => expect(labels()).toEqual(["ada", "ada", "ada", "ada", "ada", "ada", "grace", "grace", "grace"]), { timeout: 5_000 });
+  });
+
   it("pushes nothing for a message deleted before the room tells the Workspace of it, though its thread keeps its place", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const pushed = pushServices();
@@ -455,6 +551,75 @@ describe("Bots in threads", () => {
     expect(answered.message).toMatchObject({ creator: { id: bot.id }, plainText: "On it", parentId: parent.id, alsoSent: false });
     expect(JSON.parse(bodies[0]!).message.path).toBe(threadPath(general, parent.id, asked.id));
     expect(idsOf((await openThread(client, parent.id)).messages)).toEqual([asked.id, answered.message.id]);
+  });
+
+  /** What Ember delivers to a webhook that says nothing back, as one that answers later doesn't, each by the message it delivers. */
+  function deliveredLater(): Map<string, { room: { path: string } }> {
+    const delivered = new Map<string, { room: { path: string } }>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const body = JSON.parse(init!.body as string) as { room: { path: string }; message: { id: string } };
+      delivered.set(body.message.id, body);
+      return new Response(null, { status: 204 });
+    });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    return delivered;
+  }
+
+  it("delivers a reply in a thread with an address that posts in the thread alone, for a bot that answers later, and a message in the room with the room's", async () => {
+    const { ada, general } = await setUp();
+    const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
+    const delivered = deliveredLater();
+    const client = await connect(general, ada);
+    const parent = await post(client, `<p>${mention(bot)} release notes</p>`);
+    const asked = await reply(client, parent, `<p>${mention(bot)} build it</p>`);
+    await vi.waitFor(() => expect(delivered.size).toBe(2));
+    const { key } = (await workspaceStub().botWebhook(general, bot.id))!;
+    expect(delivered.get(parent.id)!.room.path).toBe(botMessagesPath(general, key));
+    expect(delivered.get(asked.id)!.room.path).toBe(botMessagesPath(general, key, parent.id));
+
+    const posted = await api(delivered.get(asked.id)!.room.path, { method: "POST", body: "Built" });
+    expect(posted.status).toBe(201);
+    const answered = await client.next("message.created");
+    expect(answered.message).toMatchObject({ creator: { id: bot.id }, plainText: "Built", parentId: parent.id, alsoSent: false });
+    expect(posted.headers.get("Location")).toBe(`${origin}${threadPath(general, parent.id, answered.message.id)}`);
+    expect(idsOf((await openThread(client, parent.id)).messages)).toEqual([asked.id, answered.message.id]);
+
+    expect((await api(delivered.get(parent.id)!.room.path, { method: "POST", body: "Noted" })).status).toBe(201);
+    const inRoom = await client.next("message.created");
+    expect(inRoom.message.plainText).toBe("Noted");
+    expect(inRoom.message.parentId).toBeUndefined();
+  });
+
+  it("posts a file a bot sends later to a thread's address in the thread", async () => {
+    const { ada, general } = await setUp();
+    const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
+    const client = await connect(general, ada);
+    const parent = await post(client, "<p>Release notes</p>");
+
+    const form = new FormData();
+    form.set("attachment", new File([recordedImage("moon-thumb.jpg")], "moon.jpg", { type: "image/jpeg" }));
+    expect((await api(botMessagesPath(general, bot.key, parent.id), { method: "POST", body: form })).status).toBe(201);
+    const { message } = await client.next("message.created");
+    expect(message).toMatchObject({ creator: { id: bot.id }, plainText: "moon.jpg", parentId: parent.id, alsoSent: false });
+    expect(idsOf((await openThread(client, parent.id)).messages)).toEqual([message.id]);
+  });
+
+  it("answers 404 to a bot posting to a thread the room doesn't have, or to a reply, which has no thread, posting nothing and keeping none of its file", async () => {
+    const { ada, general } = await setUp();
+    const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
+    const client = await connect(general, ada);
+    const parent = await post(client, "<p>Release notes</p>");
+    const asked = await reply(client, parent, "<p>Build it</p>");
+
+    for (const threadId of ["nothing", asked.id]) {
+      expect((await api(botMessagesPath(general, bot.key, threadId), { method: "POST", body: "Built" })).status).toBe(404);
+      const form = new FormData();
+      form.set("attachment", new File([recordedImage("moon-thumb.jpg")], "moon.jpg", { type: "image/jpeg" }));
+      expect((await api(botMessagesPath(general, bot.key, threadId), { method: "POST", body: form })).status).toBe(404);
+      expect(await storedFiles()).toEqual([]);
+    }
+    await settle(client);
+    expect(await roomSql(general, "SELECT id FROM messages WHERE room_id = ? AND id NOT IN (?, ?)", general, parent.id, asked.id)).toEqual([]);
   });
 });
 

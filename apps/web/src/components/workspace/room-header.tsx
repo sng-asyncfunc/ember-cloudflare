@@ -1,15 +1,21 @@
-import type { Favorites, Involvement, Me, Room, User } from "@ember/protocol";
+import { useContext } from "react";
+import type { Favorites, Involvement, Me, Room, User, UserId } from "@ember/protocol";
 import { ChatBubbleEmpty, MoreHoriz, Search } from "@/components/icons/iconoir";
 import { RoomIcon } from "@/components/icons/room-icon";
 import { PageLink } from "@/components/page-link";
+import { useAccount } from "@/hooks/use-account";
 import { useNameOf } from "@/hooks/use-directory";
 import { roomSettingsPath, SEARCHES_PATH } from "@/hooks/use-route";
+import { hasHuddles } from "@/lib/huddle-people";
 import type { RoomAnswer } from "@/lib/room-list";
 import type { ConnectionStatus } from "@/lib/room-state";
 import { cn } from "@/lib/utils";
+import { AgentBadge, useIsWithAgent } from "./agent-badge";
 import { FavoriteButton } from "./favorite-button";
+import { HuddleButton, useJoinsNoHuddle } from "./huddle-button";
 import { NotificationBell } from "./notification-bell";
 import { HEADER_BUTTON, PageHeader } from "./page-header";
+import { OpenSearchContext, opensSearch } from "./search-box";
 import { UserAvatar } from "./user-avatar";
 
 const MAX_FACES = 4;
@@ -18,6 +24,8 @@ interface Props {
   room: Room;
   /** Its name as whoever's reading it reads it, which for a DM names the others in it. */
   name: string;
+  /** Whoever's reading it. */
+  meId: UserId;
   present: User[];
   status: ConnectionStatus;
   /** Whether the room has been without a connection long enough to say so. */
@@ -36,13 +44,20 @@ interface Props {
 }
 
 /**
- * The room header: the room's name, its star, who's here, Search, the bell, which turns notifications on
- * until they're on and is then your notification level's, and its settings. A DM's has a chat bubble in
- * place of the room's icon, and no star.
+ * The room header: the room's name, its star, who's here, the huddle button once huddles are on, Search,
+ * which opens the search box in the room, the bell, which turns notifications on until they're on and
+ * is then your notification level's, and its settings. A DM's has a chat bubble in place of the room's
+ * icon, and no star, a huddle button only when it has someone in it to huddle with, which neither a
+ * bot nor anyone who can no longer sign in is, and a DM with an AI agent alone the agent badge after its
+ * name.
  */
-export function RoomHeader({ room, name, present, status, offline, favorite, onStarred, involvement, askForRoom, onSessionChanged, onFailed }: Props) {
+export function RoomHeader({ room, name, meId, present, status, offline, favorite, onStarred, involvement, askForRoom, onSessionChanged, onFailed }: Props) {
   const nameOf = useNameOf();
+  const isWithAgent = useIsWithAgent();
+  const openSearch = useContext(OpenSearchContext);
+  const joinsNone = useJoinsNoHuddle();
   const direct = room.kind === "direct";
+  const huddles = useAccount().huddles && hasHuddles(room, meId, joinsNone);
   return (
     <PageHeader>
       <div className="flex min-w-0 flex-1 items-center gap-2.5 max-md:gap-[7px]">
@@ -60,6 +75,7 @@ export function RoomHeader({ room, name, present, status, offline, favorite, onS
             name
           )}
         </h1>
+        {isWithAgent(room) && <AgentBadge />}
         {!direct && <FavoriteButton roomId={room.id} favorite={favorite} onSaved={onStarred} onSessionChanged={onSessionChanged} />}
         {/* The composer's disabled while it's offline; this says why. */}
         {offline && (
@@ -83,7 +99,14 @@ export function RoomHeader({ room, name, present, status, offline, favorite, onS
 
       {/* The room's actions, 6px apart, and touching at 900px and below. */}
       <div className="flex shrink-0 items-center gap-1.5 max-md:gap-0">
-        <PageLink href={SEARCHES_PATH} title="Search messages" className={HEADER_BUTTON}>
+        {huddles && <HuddleButton roomId={room.id} />}
+        {/* A phone under 430px wide has no room for both, and Search is in the drawer's rail too. */}
+        <PageLink
+          href={SEARCHES_PATH}
+          title="Search messages"
+          onClick={opensSearch(openSearch, { roomId: room.id })}
+          className={cn(HEADER_BUTTON, huddles && "max-[429px]:hidden")}
+        >
           <Search className="size-5" />
           <span className="sr-only">Search messages</span>
         </PageLink>

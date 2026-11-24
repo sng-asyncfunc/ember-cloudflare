@@ -4,6 +4,7 @@ import {
   startingInvolvement,
   uploadPartPath,
   uploadsPath,
+  workspaceSocketQuery,
   type ClientFrame,
   type DirectRoom,
   type Me,
@@ -19,10 +20,12 @@ import {
   type User,
   type UserId,
   type WorkspaceServerFrame,
+  type WorkspaceSocketParams,
 } from "@ember/protocol";
-import { applyD1Migrations, reset, runInDurableObject, type D1Migration } from "cloudflare:test";
+import type { ModelFormat, ThinkingLevel } from "@ember/protocol/assistant";
+import { applyD1Migrations, evictDurableObject, reset, runInDurableObject, type D1Migration } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
-import { expect } from "vitest";
+import { expect, vi } from "vitest";
 import { ADDRESS_HEADER, AUTHORIZED_AT_HEADER, BANNED_HEADER, ROOM_HEADER, SESSION_HEADER, USER_HEADER, type ChatRoom } from "../src/chat-room";
 import { toBase64, toBase64url, urlsafeDecode64 } from "../src/encoding";
 import type { Env } from "../src/env";
@@ -30,6 +33,7 @@ import worker from "../src/index";
 import { forgetNewestRelease } from "../src/releases";
 import { searchIndex } from "../src/search-index";
 import { workspace, type Workspace } from "../src/workspace";
+import type { WorkspaceStore } from "../src/workspace-store";
 
 export const origin = "https://ember.test";
 
@@ -54,6 +58,25 @@ export const api = (path: string, init: RequestInit = {}) => exports.default.fet
 /** The same request, to a Worker whose bindings differ from this suite's by `changes`. `path` may be a whole URL. */
 export const apiWith = (changes: Partial<Env>, path: string, init: RequestInit<IncomingRequestCfProperties> = {}) =>
   worker.fetch(new Request(new URL(path, origin), fromOwnPages(path, init)), { ...(env as unknown as Env), ...changes });
+
+/**
+ * What Ember AI's settings say of @ember's avatar while it's Ember's flame, as it is until an
+ * administrator uploads one: its address, at whichever version.
+ */
+export const WITH_THE_FLAME = { avatarUrl: expect.stringMatching(/^\/users\/ember\.[\w-]+\/avatar\?v=\d{14}(?:&|$)/) as string, avatar: false };
+
+/** When the owner of the avatar at `avatarUrl` last changed, as its address says (`?v=`), so a later address has a larger one. */
+export const avatarVersionOf = (avatarUrl: string) => Number(new URL(avatarUrl, origin).searchParams.get("v"));
+
+/**
+ * Stops the clock, for the Workspace too, which then moves only as far as anything waits, at once: what
+ * happens next happens in the same second, but for what waits for a later one. `vi.useRealTimers` and
+ * `vi.restoreAllMocks` start it again.
+ */
+export function stopTheClock(): void {
+  vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+  vi.spyOn(scheduler, "wait").mockImplementation(async (ms) => void vi.setSystemTime(Date.now() + ms));
+}
 
 /** One of the recorded images (fixtures/README.md), by its name in fixtures/storage/. */
 export function recordedImage(name: string): Uint8Array {
@@ -83,8 +106,8 @@ export async function freshDeploy(): Promise<void> {
   // alarm delivers what the last test queued, so it's made again until the Workspace has nobody.
   do {
     await reset();
-    const { DB, TEST_MIGRATIONS } = env as unknown as { DB?: D1Database; TEST_MIGRATIONS: D1Migration[] };
-    if (DB) await applyD1Migrations(DB, TEST_MIGRATIONS);
+    const db = sharedD1();
+    if (db) await applyD1Migrations(db, (env as unknown as { TEST_MIGRATIONS: D1Migration[] }).TEST_MIGRATIONS);
   } while (await anyoneLeft());
   host = undefined;
   forgetNewestRelease();
@@ -184,6 +207,31 @@ export async function cutOff(room: RoomId, calls: number[] = []): Promise<() => 
     });
 }
 
+/**
+ * Has the Workspace hold the next call room `room` makes to tell it what the room has logged until
+ * `release` is called, as a call can still be out while a busy room logs more, which waits for the call
+ * after it. `called` waits until the call has come.
+ */
+export async function holdNextCall(room: RoomId): Promise<{ called: () => Promise<void>; release: () => void }> {
+  let came = false;
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  await runInDurableObject(workspaceStub(), (instance: Workspace) => {
+    const store = (instance as unknown as { store: WorkspaceStore }).store;
+    const apply = store.applyRoomEvents.bind(store);
+    store.applyRoomEvents = async (roomId, ...rest) => {
+      if (roomId === room) {
+        store.applyRoomEvents = apply;
+        came = true;
+        await released;
+      }
+      return apply(roomId, ...rest);
+    };
+  });
+  // Looked at again and again, since workerd can't wake a test from inside the Workspace.
+  return { called: () => vi.waitFor(() => expect(came).toBe(true), { interval: 2, timeout: 5000 }), release };
+}
+
 /** How `ws` closes, once it does. */
 export const closeOf = (ws: WebSocket) => new Promise<CloseEvent>((resolve) => ws.addEventListener("close", resolve));
 
@@ -205,11 +253,42 @@ export async function withWorkspaceEnv(changes: Partial<Env>, run: () => Promise
   }
 }
 
+/**
+ * Has the Workspace count the addresses it's told to email a link to join with, which the Worker tells
+ * it once it has answered the ask, without waiting for it, so an answer doesn't say the Workspace has
+ * been told. `told` waits until it has been told `n` of them, each on its way by then, `holdUntil`
+ * keeps it from taking any until a promise ends, as if the Worker's word were still on its way, and
+ * `stop` has it take them as it did.
+ */
+export async function countAddressesToEmail(): Promise<{ told: (n: number) => Promise<void>; holdUntil: (held: Promise<void>) => void; stop: () => void }> {
+  let count = 0;
+  let held: Promise<void> | undefined;
+  let stop!: () => void;
+  await runInDurableObject(workspaceStub(), (instance: Workspace) => {
+    const prototype = Object.getPrototypeOf(instance) as Pick<Workspace, "emailJoinLink">;
+    const emailJoinLink = prototype.emailJoinLink;
+    prototype.emailJoinLink = async function (this: Workspace, ...asked) {
+      const waits = held;
+      if (waits) count++;
+      await waits;
+      emailJoinLink.apply(this, asked);
+      if (!waits) count++;
+    };
+    stop = () => void (prototype.emailJoinLink = emailJoinLink);
+  });
+  return {
+    // Looked at again and again, since workerd can't wake a test from inside the Workspace.
+    told: (n) => vi.waitFor(() => expect(count).toBeGreaterThanOrEqual(n), { interval: 2, timeout: 5000 }),
+    holdUntil: (until) => void (held = until),
+    stop,
+  };
+}
+
 /** The search index's Durable Object. */
 export const searchIndexStub = () => searchIndex(env as unknown as Env);
 
 /** The calls the Workspace makes on a room, as a test answers them in every room's stead. */
-export type RoomStandIn = Partial<Pick<ChatRoom, "revoke" | "removeMessagesBy" | "reindex" | "authors">>;
+export type RoomStandIn = Partial<Pick<ChatRoom, "revoke" | "removeMessagesBy" | "removeEverythingBy" | "reindex" | "authors">>;
 
 /** Has `rooms` answer the Workspace's calls to rooms until the function it answers with is called, which gives the rooms back. */
 export async function standInForRooms(rooms: RoomStandIn): Promise<() => Promise<void>> {
@@ -232,9 +311,18 @@ export function objectSql(stub: DurableObjectStub, query: string, ...params: Arr
   return runInDurableObject(stub, (_object, state: DurableObjectState) => state.storage.sql.exec(query, ...params).toArray());
 }
 
+/**
+ * The D1 database every object keeps its tables in when this suite runs on D1, or undefined on DO SQLite,
+ * where wrangler.jsonc binds one that nothing uses, as Deploy to Cloudflare's form makes one for every copy.
+ */
+export function sharedD1(): D1Database | undefined {
+  const { STORAGE_BACKEND, DB } = env as unknown as Env;
+  return STORAGE_BACKEND === "d1" ? DB : undefined;
+}
+
 /** Runs SQL against the tables `stub` keeps: in D1 when this suite uses it, else in the object's own storage. */
 async function tablesSql(stub: DurableObjectStub, query: string, ...params: Array<string | number>): Promise<unknown[]> {
-  const db = (env as { DB?: D1Database }).DB;
+  const db = sharedD1();
   if (db) return (await db.prepare(query).bind(...params).all()).results;
   return objectSql(stub, query, ...params);
 }
@@ -254,6 +342,58 @@ export async function roomSql(room: string, query: string, ...params: Array<stri
 
 /** Runs SQL against the Workspace's tables, whichever backend this suite is using. */
 export const workspaceSql = (query: string, ...params: Array<string | number>) => tablesSql(workspaceStub(), query, ...params);
+
+/** Has the Workspace read what's stored afresh, as it does once it starts again, whether or not it's running now. */
+async function restartWorkspace(): Promise<void> {
+  // On D1 what's stored changes without the Workspace, which then needn't be running to be stopped.
+  await runInDurableObject(workspaceStub(), () => {});
+  await evictDurableObject(workspaceStub());
+}
+
+/**
+ * A model kept before Ember stopped offering it, as a copy set up then keeps it: its ID, its name, the
+ * format Cloudflare's REST API took it in, and the levels of thinking it took its test question at.
+ */
+export interface KeptModel {
+  id: string;
+  name: string;
+  format: ModelFormat;
+  thinkingLevels: readonly ThinkingLevel[];
+}
+
+/**
+ * Has Ember AI, which is on, answer everyone with `model`, which Ember no longer offers, as a copy set
+ * up before Ember stopped offering it does, with it and `others` the models people can pick, as the
+ * Workspace finds when it next opens.
+ */
+export async function answerWithKeptModel(model: KeptModel, ...others: KeptModel[]): Promise<void> {
+  const models = [model, ...others].map(({ thinkingLevels, ...kept }) => ({ ...kept, thinking_levels: thinkingLevels }));
+  await workspaceSql(
+    "UPDATE accounts SET settings = json_set(settings, '$.assistant.model', ?, '$.assistant.format', ?, '$.assistant.models', json(?))",
+    model.id,
+    model.format,
+    JSON.stringify(models),
+  );
+  await restartWorkspace();
+}
+
+/**
+ * Adds `models`, which Ember no longer offers, to those people can pick, after the others, as a copy set
+ * up before Ember stopped offering them has them, as the Workspace finds when it next opens.
+ */
+export async function addKeptModels(...models: KeptModel[]): Promise<void> {
+  const [{ settings }] = (await workspaceSql("SELECT settings FROM accounts")) as [{ settings: string }];
+  const others = (JSON.parse(settings) as { assistant: { models: unknown[] } }).assistant.models;
+  const kept = models.map(({ thinkingLevels, ...model }) => ({ ...model, thinking_levels: thinkingLevels }));
+  await workspaceSql("UPDATE accounts SET settings = json_set(settings, '$.assistant.models', json(?))", JSON.stringify([...others, ...kept]));
+  await restartWorkspace();
+}
+
+/** Has the agent `agentId` answer with `model`, which Ember no longer offers, as an agent made before Ember stopped offering it does. */
+export async function agentWithKeptModel(agentId: UserId, { id, name, format, thinkingLevels }: KeptModel): Promise<void> {
+  await workspaceSql("UPDATE agents SET model = ?, model_name = ?, format = ?, thinking_levels = ? WHERE user_id = ?", id, name, format, JSON.stringify(thinkingLevels), agentId);
+  await restartWorkspace();
+}
 
 /** Runs SQL against the search index's tables, which it keeps in its own storage on either backend. */
 export const searchSql = (query: string, ...params: Array<string | number>) => objectSql(searchIndexStub(), query, ...params);
@@ -348,6 +488,34 @@ export async function reconnect(room: string, session: Session, since: number) {
   return { ...socket, opening: await socket.next("welcome", "resumed") };
 }
 
+/** Queues every frame `ws` receives, for a test to read in its own time. */
+export function framesOf<Frame extends { type: string }>(ws: WebSocket) {
+  const frames: Frame[] = [];
+  /** Every frame received, in order, whether or not it has been read. */
+  const log: Frame[] = [];
+  const waiters: Array<() => void> = [];
+  ws.addEventListener("message", (event) => {
+    const frame = JSON.parse(event.data as string) as Frame;
+    frames.push(frame);
+    log.push(frame);
+    waiters.splice(0).forEach((wake) => wake());
+  });
+
+  /** The next unread frame of one of `types`, waiting for it if need be. */
+  async function next<T extends Frame["type"]>(...types: T[]): Promise<Extract<Frame, { type: T }>> {
+    for (;;) {
+      const index = frames.findIndex((f) => (types as string[]).includes(f.type));
+      if (index >= 0) return frames.splice(index, 1)[0] as Extract<Frame, { type: T }>;
+      await new Promise<void>((resolve) => waiters.push(resolve));
+    }
+  }
+
+  /** Unread frames of `type` that have already arrived. */
+  const pending = (type: Frame["type"]) => frames.filter((f) => f.type === type);
+
+  return { next, pending, log };
+}
+
 /** Opens a room socket in `session` and queues every frame it receives. */
 async function openSocket(room: string, session: Session, params?: RoomSocketParams | "outdated") {
   const query = params === "outdated" ? "" : params ? roomSocketQuery(params) : `?protocol=${ROOM_PROTOCOL}`;
@@ -356,35 +524,10 @@ async function openSocket(room: string, session: Session, params?: RoomSocketPar
   if (!ws) throw new Error(`No socket: ${response.status} ${await response.text()}`);
   ws.accept();
 
-  const frames: ServerFrame[] = [];
-  /** Every frame received, in order, whether or not it has been read. */
-  const log: ServerFrame[] = [];
-  const waiters: Array<() => void> = [];
-  ws.addEventListener("message", (event) => {
-    const frame = JSON.parse(event.data as string) as ServerFrame;
-    frames.push(frame);
-    log.push(frame);
-    waiters.splice(0).forEach((wake) => wake());
-  });
-
-  /** The next unread frame of one of `types`, waiting for it if need be. */
-  async function next<T extends ServerFrame["type"]>(...types: T[]): Promise<Extract<ServerFrame, { type: T }>> {
-    for (;;) {
-      const index = frames.findIndex((f) => (types as string[]).includes(f.type));
-      if (index >= 0) return frames.splice(index, 1)[0] as Extract<ServerFrame, { type: T }>;
-      await new Promise<void>((resolve) => waiters.push(resolve));
-    }
-  }
-
-  /** Unread frames of `type` that have already arrived. */
-  const pending = (type: ServerFrame["type"]) => frames.filter((f) => f.type === type);
-
   return {
     ws,
     session,
-    next,
-    pending,
-    log,
+    ...framesOf<ServerFrame>(ws),
     // Any frame, the ones the protocol refuses included. Not `Record<string, unknown>`: once ClientFrame
     // has ten members, TypeScript checks an object literal against the member its `type` names alone.
     send: (frame: ClientFrame | { type: string; [field: string]: unknown }) => ws.send(JSON.stringify(frame)),
@@ -414,9 +557,12 @@ export async function settle(...clients: Socket[]): Promise<void> {
   }
 }
 
-/** Opens a workspace socket in `session`, as a tab does, and queues what the Workspace sends on it after its welcome. */
-export async function openWorkspaceSocket(session: Session) {
-  const response = await api("/api/socket", upgrade(session.cookie));
+/**
+ * Opens a workspace socket in `session`, as a tab does, and queues what the Workspace sends on it after
+ * its welcome. Its address says whether the tab is shown only if `params` does.
+ */
+export async function openWorkspaceSocket(session: Session, params?: WorkspaceSocketParams) {
+  const response = await api(`/api/socket${params ? workspaceSocketQuery(params) : ""}`, upgrade(session.cookie));
   if (!response.webSocket) throw new Error(`No socket: ${response.status} ${await response.text()}`);
   const ws = response.webSocket;
   const frames: WorkspaceServerFrame[] = [];
@@ -448,6 +594,13 @@ export type WorkspaceSocket = Awaited<ReturnType<typeof openWorkspaceSocket>>;
 
 const ECDH = { name: "ECDH", namedCurve: "P-256" } as const;
 const encoder = new TextEncoder();
+
+/** Pauses `session`'s notifications for `ms` from now, as the rail's Pause notifications does, or resumes them with null. */
+export async function pauseNotifications(session: Session, ms: number | null): Promise<void> {
+  const until = ms === null ? null : new Date(Date.now() + ms).toISOString();
+  const response = await api("/api/users/me/notifications-pause", { method: "PUT", headers: { Cookie: session.cookie }, body: JSON.stringify({ until }) });
+  expect(response.status, await response.clone().text()).toBe(200);
+}
 
 /** A browser that has subscribed to pushes: its keys, as its subscription gives them, and what reads the pushes made for them. */
 export interface PushBrowser {

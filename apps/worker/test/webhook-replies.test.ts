@@ -1,7 +1,7 @@
 import { MAX_MESSAGE_HTML_LENGTH } from "@ember/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { contentTypeOf, replyFileOf } from "../src/bots/mime";
-import { MAX_FILE_REPLY_BYTES, postWebhook, WebhookError, type Delivered, type Keep } from "../src/bots/webhooks";
+import { DELIVERY_DEADLINE_MS, MAX_FILE_REPLY_BYTES, postClick, postWebhook, WebhookError, type Delivered, type Keep, type Timeouts } from "../src/bots/webhooks";
 import recorded from "./fixtures/webhook_cases.json";
 import answers from "./fixtures/webhook_expected.json";
 
@@ -13,7 +13,8 @@ import answers from "./fixtures/webhook_expected.json";
 // would give it, a gzipped body decompressed, and the delivery must come to what Campfire's did: the
 // webhook's status and the bot's reply, or a failure. The request must be the one Net::HTTP sent, but
 // for the headers a Worker's `fetch` decides itself. A file is kept as it arrives, where Campfire reads
-// all of it first, and must come to the bytes Campfire kept.
+// all of it first, and must come to the bytes Campfire kept. The answers are given the 7 seconds
+// Campfire gave them, where Ember gives a webhook 30.
 
 interface Case {
   name: string;
@@ -38,6 +39,9 @@ const cases = recorded as Case[];
 
 /** What the recording delivers to each webhook. */
 const PAYLOAD = '{"message":"hi"}';
+
+/** The time Campfire gives a webhook, `Webhook::ENDPOINT_TIMEOUT`, which its late answer was recorded with. */
+const CAMPFIRE_TIMEOUTS: Timeouts = { endpointMs: 7_000, deadlineMs: DELIVERY_DEADLINE_MS };
 
 /** The headers Net::HTTP sends that a Worker's `fetch` decides itself. */
 const FETCH_HEADERS = ["Accept-Encoding", "Host", "Connection", "Content-Length"];
@@ -153,7 +157,7 @@ describe("Webhook replies", () => {
     // Late answers wait on the clock, which the test moves on.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const webhook = webhookAnswering(recorded);
-    const delivered = postWebhook(recorded.url ?? `https://bots.example.com/${recorded.name}`, PAYLOAD, keepBytes, { send: webhook.send });
+    const delivered = postWebhook(recorded.url ?? `https://bots.example.com/${recorded.name}`, PAYLOAD, keepBytes, { send: webhook.send, timeouts: CAMPFIRE_TIMEOUTS });
 
     if (answer.error) {
       await expect(delivered).rejects.toThrow(FAILURES[answer.error]!(recorded));
@@ -197,19 +201,19 @@ describe("Webhook replies", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
-  it("gives a webhook 7 seconds to send each part of its answer and a minute in all, then says it failed to respond", async () => {
+  it("gives a webhook 30 seconds to send each part of its answer and a minute in all, then says it failed to respond", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
-    const steady = deliveredTo(trickling(6_000, 3));
-    await vi.advanceTimersByTimeAsync(24_000);
-    expect(await steady).toEqual({ status: 200, reply: { text: "1 2 3 " } });
+    const steady = deliveredTo(trickling(29_000, 1));
+    await vi.advanceTimersByTimeAsync(58_000);
+    expect(await steady).toEqual({ status: 200, reply: { text: "1 " } });
 
-    const stalled = deliveredTo(trickling(8_000));
-    await vi.advanceTimersByTimeAsync(7_000);
-    expect(await stalled).toEqual({ status: null, reply: { text: "Failed to respond within 7 seconds" } });
+    const stalled = deliveredTo(trickling(31_000));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await stalled).toEqual({ status: null, reply: { text: "Failed to respond within 30 seconds" } });
 
     // The deadline: one that keeps sending would otherwise hold its place in the queue for ever.
-    const endless = deliveredTo(trickling(6_000));
+    const endless = deliveredTo(trickling(29_000));
     await vi.advanceTimersByTimeAsync(60_000);
     expect(await endless).toEqual({ status: null, reply: { text: "Failed to respond within 60 seconds" } });
   });
@@ -231,26 +235,26 @@ describe("Webhook replies", () => {
     await vi.waitFor(() => expect(cancelled).toBe(true));
   });
 
-  it("keeps a file a part at a time as it arrives, giving the webhook 7 seconds for each part however long keeping one takes", async () => {
+  it("keeps a file a part at a time as it arrives, giving the webhook 30 seconds for each part however long keeping one takes", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const kept: string[] = [];
-    /** Keeps each part as it comes, taking 10 seconds over each, as R2 might. */
+    /** Keeps each part as it comes, taking 40 seconds over each, longer than the webhook has to send one. */
     const slowly: Keep<string[]> = async ({ filename, declaredType, read }) => {
       kept.push(`${filename} (${declaredType})`);
       for (let chunk = await read(); chunk; chunk = await read()) {
-        await new Promise((resolve) => setTimeout(resolve, 10_000));
+        await new Promise((resolve) => setTimeout(resolve, 40_000));
         kept.push(new TextDecoder().decode(chunk));
       }
       return kept;
     };
 
-    const steady = deliveredTo(trickling(6_000, 3, "image/png"), slowly);
-    await vi.advanceTimersByTimeAsync(54_000);
-    expect(await steady).toEqual({ status: 200, reply: { file: { filename: "attachment.png", contentType: "image/png" }, kept: ["attachment.png (image/png)", "1 ", "2 ", "3 "] } });
+    const steady = deliveredTo(trickling(6_000, 1, "image/png"), slowly);
+    await vi.advanceTimersByTimeAsync(52_000);
+    expect(await steady).toEqual({ status: 200, reply: { file: { filename: "attachment.png", contentType: "image/png" }, kept: ["attachment.png (image/png)", "1 "] } });
 
-    const stalled = deliveredTo(trickling(8_000, Infinity, "image/png"), slowly);
-    await vi.advanceTimersByTimeAsync(7_000);
-    expect(await stalled).toEqual({ status: null, reply: { text: "Failed to respond within 7 seconds" } });
+    const stalled = deliveredTo(trickling(31_000, Infinity, "image/png"), slowly);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await stalled).toEqual({ status: null, reply: { text: "Failed to respond within 30 seconds" } });
   });
 
   it("keeps an empty file", async () => {
@@ -325,6 +329,45 @@ describe("Webhook replies", () => {
       new WebhookError("R2 is unavailable"),
     );
     await vi.waitFor(() => expect(cancelled).toBe(true));
+  });
+});
+
+describe("Answers to a click", () => {
+  /** What a click's delivery to a webhook that `send` stands in for comes to. */
+  const clicked = (send: typeof fetch) => postClick("https://bots.example.com/hook", "{}", keepBytes, { send });
+  const answering = (body: BodyInit | null, init?: ResponseInit) => (async () => new Response(body, init)) as typeof fetch;
+  const json = { headers: { "Content-Type": "application/json; charset=utf-8" } };
+
+  it("reads a 200's JSON as a payload for the card, which a message's delivery keeps as a file", async () => {
+    const payload = '{"text":"Approved"}';
+    expect(await clicked(answering(payload, json))).toEqual({ status: 200, answer: { payload } });
+    expect(await deliveredTo(answering(payload, json))).toEqual({ status: 200, reply: { file: { filename: "attachment.json", contentType: "application/json" }, kept: new TextEncoder().encode(payload) } });
+  });
+
+  it("reads anything else as a message's delivery does: text, a file, or nothing", async () => {
+    expect(await clicked(answering("On it.", { headers: { "Content-Type": "text/plain" } }))).toEqual({ status: 200, answer: { text: "On it." } });
+    expect(await clicked(answering("GIF89a", { headers: { "Content-Type": "image/gif" } }))).toEqual({
+      status: 200,
+      answer: { file: { filename: "attachment.gif", contentType: "image/gif" }, kept: new TextEncoder().encode("GIF89a") },
+    });
+    expect(await clicked(answering(null, { status: 204 }))).toEqual({ status: 204, answer: null });
+    // An error's JSON is no payload.
+    expect(await clicked(answering('{"text":"no"}', { status: 500, ...json }))).toEqual({ status: 500, answer: null });
+  });
+
+  it("fails a payload longer than a message's markup can be", async () => {
+    await expect(clicked(answering(`{"text":"${"x".repeat(MAX_MESSAGE_HTML_LENGTH)}"}`, json))).rejects.toThrow(new WebhookError("the reply is longer than a message can be"));
+  });
+
+  it("says nothing for the bot when its webhook doesn't answer in time, where a message's delivery has it say it failed", async () => {
+    vi.useFakeTimers();
+    const never = (async (_input: URL, init: RequestInit) => {
+      await answeredAfter(120_000, init.signal!);
+      return new Response(null);
+    }) as typeof fetch;
+    const delivered = clicked(never);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await delivered).toEqual({ status: null, answer: null });
   });
 });
 

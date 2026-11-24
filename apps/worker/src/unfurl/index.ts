@@ -83,6 +83,11 @@ function requiredUrl(body: unknown): unknown {
 
 /** Whether `url` is on this Ember's own host, which the app never shows a preview of. */
 function isOwnHost(url: string, request: Request): boolean {
+  return isOnHost(url, [urlOf(request).host]);
+}
+
+/** Whether `url` is on one of `hosts`, as `location.host` writes them, at any port. */
+export function isOnHost(url: string, hosts: readonly string[]): boolean {
   const host = parseHttpUri(url)?.host.toLowerCase().replace(/\.$/, "");
-  return host === urlOf(request).hostname;
+  return host !== undefined && hosts.some((own) => own.replace(/:\d+$/, "") === host);
 }

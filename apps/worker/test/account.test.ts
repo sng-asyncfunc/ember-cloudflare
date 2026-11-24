@@ -6,6 +6,7 @@ import {
   type Account,
   type Bootstrap,
   type EmailSettings,
+  type Me,
   type NewJoinCode,
   type NewWorkspace,
   type Sidebar,
@@ -22,9 +23,10 @@ import type { JoinableAccount, WorkspaceStore } from "../src/workspace-store";
 import { api, cookieOf, freshDeploy, openWorkspaceSocket, origin, shown, signIn, workspaceSql, workspaceStub, type Session } from "./support";
 
 const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
+const grace = { name: "Grace Hopper", emailAddress: "grace@example.com", password: "compiler design" };
 
 /** The workspace named `name`, as pages show a new one: translation buttons hidden, no custom CSS, and rooms anyone can create. */
-const named = (name: string): Account => ({ name, tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {} });
+const named = (name: string): Account => ({ name, tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, restrictChannelMentions: false, restrictEveryoneMention: false, warnBeforeNotifying: true, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true, huddleVideo: "hd" });
 
 /** How a new workspace sends email: with the binding wrangler.jsonc declares, from no address yet. */
 const NEW_EMAIL: EmailSettings = { provider: "cloudflare", resendKey: null, cloudflare: true, from: null };
@@ -54,6 +56,13 @@ const storedSettings = async () => ((await workspaceSql("SELECT settings, update
 
 const storedJoinCode = async () => ((await workspaceSql("SELECT join_code FROM accounts")) as Array<{ join_code: string }>)[0]!.join_code;
 
+/** Grace joins with the join link, as a member, signed in. */
+async function joinAsGrace(): Promise<Session> {
+  const response = await api(`/api/join/${await storedJoinCode()}`, { method: "POST", body: JSON.stringify(grace) });
+  expect(response.status, await response.clone().text()).toBe(201);
+  return { user: shown(((await response.json()) as { user: Me }).user), cookie: cookieOf(response) };
+}
+
 /** A join code: 12 letters and digits, in fours. */
 const JOIN_CODE = /^[A-Za-z0-9]{4}(-[A-Za-z0-9]{4}){2}$/;
 
@@ -63,12 +72,23 @@ const storeOf = (workspace: Workspace) => (workspace as unknown as { store: Work
 beforeEach(freshDeploy);
 
 describe("Community settings page", () => {
-  it("shows anyone signed in the workspace, its join code, and whether they can change it", async () => {
+  it("shows members and administrators the workspace, its join code, and whether they can change it", async () => {
     const administrator = await setUp();
-    const member = await signIn("Grace");
+    const member = await joinAsGrace();
     const joinCode = await storedJoinCode();
-    expect(await (await settings(administrator)).json()).toEqual({ account: named("Ember"), joinCode, canAdminister: true, memberfulSite: null, memberfulWebhooks: false, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], addresses: { deployed: null, others: [] }, assistant: null } satisfies WorkspaceSettings);
-    expect(await (await settings(member)).json()).toEqual({ account: named("Ember"), joinCode, canAdminister: false, memberfulSite: null, memberfulWebhooks: false, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], addresses: { deployed: null, others: [] }, assistant: null } satisfies WorkspaceSettings);
+    expect(await (await settings(administrator)).json()).toEqual({ account: named("Ember"), joinCode, canAdminister: true, memberfulSite: null, memberfulWebhooks: false, memberfulKeys: null, memberfulSiteKept: null, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], blockedWords: [], addresses: { deployed: null, others: [] }, assistant: null, huddles: null, sso: null, outsideAi: false, cloudflareAccountId: null } satisfies WorkspaceSettings);
+    expect(await (await settings(member)).json()).toEqual({ account: named("Ember"), joinCode, canAdminister: false, memberfulSite: null, memberfulWebhooks: false, memberfulKeys: null, memberfulSiteKept: null, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], blockedWords: [], addresses: { deployed: null, others: [] }, assistant: null, huddles: null, sso: null, outsideAi: false, cloudflareAccountId: null } satisfies WorkspaceSettings);
+  });
+
+  it("gives someone who signed in with just a name no join code, which would let them stay once guests are turned away, unless they're an administrator", async () => {
+    const administrator = await setUp();
+    const guest = await signIn("Mallory");
+    expect(await (await settings(guest)).json()).toEqual({ account: named("Ember"), joinCode: null, canAdminister: false, memberfulSite: null, memberfulWebhooks: false, memberfulKeys: null, memberfulSiteKept: null, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], blockedWords: [], addresses: { deployed: null, others: [] }, assistant: null, huddles: null, sso: null, outsideAi: false, cloudflareAccountId: null } satisfies WorkspaceSettings);
+
+    // An administrator could make a new code anyway.
+    const promoted = await api(`/api/account/users/${guest.user.id}`, { method: "PATCH", headers: as(administrator), body: JSON.stringify({ role: "administrator" }) });
+    expect(promoted.status).toBe(200);
+    expect(((await (await settings(guest)).json()) as WorkspaceSettings).joinCode).toBe(await storedJoinCode());
   });
 
   it("asks who's signed in", async () => {
@@ -97,14 +117,14 @@ describe("Rail", () => {
 describe("Rename the workspace", () => {
   it("renames the workspace for an administrator, wherever its name shows", async () => {
     const administrator = await setUp();
-    const member = await signIn("Grace");
+    const member = await joinAsGrace();
 
     const response = await change(administrator, { name: "Ember Studio" });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ account: named("Ember Studio") });
     expect((await storedAccount()).name).toBe("Ember Studio");
 
-    expect(await (await settings(member)).json()).toEqual({ account: named("Ember Studio"), joinCode: await storedJoinCode(), canAdminister: false, memberfulSite: null, memberfulWebhooks: false, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], addresses: { deployed: null, others: [] }, assistant: null } satisfies WorkspaceSettings);
+    expect(await (await settings(member)).json()).toEqual({ account: named("Ember Studio"), joinCode: await storedJoinCode(), canAdminister: false, memberfulSite: null, memberfulWebhooks: false, memberfulKeys: null, memberfulSiteKept: null, turnstile: null, email: NEW_EMAIL, invitations: [], emailDomains: [], blockedWords: [], addresses: { deployed: null, others: [] }, assistant: null, huddles: null, sso: null, outsideAi: false, cloudflareAccountId: null } satisfies WorkspaceSettings);
     expect((await bootstrap(member)).account).toEqual(named("Ember Studio"));
     // "Sign in to <name>", and the installed app's name.
     expect((await bootstrap()).account).toEqual(named("Ember Studio"));
@@ -217,7 +237,7 @@ describe("Rename the workspace", () => {
       vi.spyOn(storeOf(workspace), "account").mockReturnValueOnce(new Promise((resolve) => (finishReading = resolve)));
       const reading = workspace.bootstrap(null, null, null);
       expect(await workspace.changeAccount(credentials, { name: "Ember Studio" }, "ember.test")).toEqual(named("Ember Studio"));
-      finishReading({ ...named("Ember"), joinCode: "aB3d-Ef5h-iJ7k", updatedAt: new Date().toISOString(), storedLogo: null, emailFrom: null, resendApiKey: null, deployedAddress: null, otherAddresses: [], turnstileKeys: null, assistant: null, assistantMost: TOP_LEVELS });
+      finishReading({ ...named("Ember"), joinCode: "aB3d-Ef5h-iJ7k", updatedAt: new Date().toISOString(), storedLogo: null, emailFrom: null, resendApiKey: null, deployedAddress: null, otherAddresses: [], turnstileKeys: null, memberfulKeys: null, assistant: null, assistantMost: TOP_LEVELS, assistantInstructions: "", assistantPromptTemplate: null, huddles: null, outsideAi: false, blockedWords: [], sso: null });
       await reading;
     });
     expect((await bootstrap()).account.name).toBe("Ember Studio");
@@ -566,7 +586,7 @@ describe("Translation buttons", () => {
 describe("Regenerate the join link", () => {
   it("gives the join link a new code for an administrator, wherever the link shows", async () => {
     const administrator = await setUp();
-    const member = await signIn("Grace");
+    const member = await joinAsGrace();
     const old = await storedJoinCode();
     const long = "2026-01-01T00:00:00.000Z";
     await workspaceSql("UPDATE accounts SET updated_at = ?", long);
@@ -639,7 +659,7 @@ describe("Regenerate the join link", () => {
       vi.spyOn(storeOf(workspace), "account").mockReturnValueOnce(new Promise((resolve) => (finishReading = resolve)));
       const reading = workspace.bootstrap(null, null, null);
       const regenerated = await workspace.regenerateJoinCode(credentials);
-      finishReading({ ...named("Ember"), joinCode: old, updatedAt: new Date().toISOString(), storedLogo: null, emailFrom: null, resendApiKey: null, deployedAddress: null, otherAddresses: [], turnstileKeys: null, assistant: null, assistantMost: TOP_LEVELS });
+      finishReading({ ...named("Ember"), joinCode: old, updatedAt: new Date().toISOString(), storedLogo: null, emailFrom: null, resendApiKey: null, deployedAddress: null, otherAddresses: [], turnstileKeys: null, memberfulKeys: null, assistant: null, assistantMost: TOP_LEVELS, assistantInstructions: "", assistantPromptTemplate: null, huddles: null, outsideAi: false, blockedWords: [], sso: null });
       await reading;
       return regenerated;
     });

@@ -1,17 +1,17 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AVATAR_TOO_LARGE, MAX_AVATAR_SIZE, type Account, type BotAnswer, type BotSettings, type Me } from "@ember/protocol";
+import { AVATAR_TOO_LARGE, MAX_AVATAR_SIZE, type Account, type BotAnswer, type BotSettings, type Me, type SidebarRoom } from "@ember/protocol";
 import { WEBHOOK_URL_REFUSED } from "@ember/protocol/bots";
 import defaultBotAvatar from "@/components/default-bot-avatar.svg";
 import { FlashProvider } from "@/components/flash";
 import { Sheet } from "@/components/ui/sheet";
 import { AccountContext } from "@/hooks/use-account";
-import { BotSettingsPage, CONFIRM_DELETE_BOT, CONFIRM_NEW_KEY, NewBotPage } from "./bot-settings-page";
+import { BotSettingsPage, CONFIRM_DELETE_BOT, CONFIRM_NEW_KEY, NewBotPage, ROOMS_EXPLAINED } from "./bot-settings-page";
 
 vi.mock("@/lib/previews", () => ({ avatarVariantOf: vi.fn(async () => new Blob(["variant"], { type: "image/webp" })) }));
 
-const account: Account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {} };
+const account: Account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, restrictChannelMentions: false, restrictEveryoneMention: false, warnBeforeNotifying: true, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true, huddleVideo: "hd" };
 const ada: Me = { id: "0mgk3x2a9b4c5d", name: "Ada Lovelace", administrator: true };
 
 const BOT: BotSettings = {
@@ -24,7 +24,14 @@ const BOT: BotSettings = {
   key: "0mgk3x2a9b4c5e-Ab3dEf5hiJ7k",
   rooms: [{ id: "0mgk3x2a9b4c5a", name: "general" }],
   webhookUrl: "https://ci.example.com/hook",
+  pickedRooms: null,
 };
+
+const room = (id: string, name: string, kind: "open" | "closed" = "open"): SidebarRoom => ({ id, name, kind, icon: null, unread: false, involvement: "mentions" });
+const GENERAL = room("0mgk3x2a9b4c5a", "general");
+const RANDOM = room("0mgk3x2a9b4c5b", "random");
+/** Ada's sidebar: open rooms, and one private, which a bot is put in from its settings instead. */
+const SIDEBAR: SidebarRoom[] = [RANDOM, GENERAL, room("0mgk3x2a9b4c5c", "secret plans", "closed")];
 
 const answer = (bot: BotSettings, status = 200) => Response.json({ bot } satisfies BotAnswer, { status });
 const refused = (status: number, error: string) => Response.json({ error }, { status });
@@ -70,11 +77,18 @@ function showAt(path: string, page: (props: { onMissing: () => void; onFailed: (
   return { onMissing, onFailed, user: userEvent.setup() };
 }
 
-const showNewBot = (me = ada, shown = account) => showAt("/account/bots/new", ({ onFailed }) => <NewBotPage me={me} onFailed={onFailed} />, shown);
+const showNewBot = (me = ada, shown = account) => showAt("/account/bots/new", ({ onFailed }) => <NewBotPage me={me} rooms={SIDEBAR} onFailed={onFailed} />, shown);
 const showSettings = () =>
-  showAt(`/account/bots/${BOT.id}/edit`, ({ onMissing, onFailed }) => <BotSettingsPage botId={BOT.id} onMissing={onMissing} onFailed={onFailed} />);
+  showAt(`/account/bots/${BOT.id}/edit`, ({ onMissing, onFailed }) => <BotSettingsPage botId={BOT.id} rooms={SIDEBAR} onMissing={onMissing} onFailed={onFailed} />);
 
 const nameField = () => screen.getByRole("textbox", { name: "Bot name" });
+const roomsCard = () => screen.getByRole("region", { name: "Rooms" });
+const everyRoom = () => screen.getByRole("radio", { name: "Every room" });
+const chosenRooms = () => screen.getByRole("radio", { name: "Only the rooms I choose" });
+/** The rooms Only the rooms I choose offers, by name, with whether each is ticked. */
+const roomBoxes = () => within(roomsCard()).queryAllByRole("checkbox").map((box) => [box.closest("label")!.textContent, (box as HTMLInputElement).checked]);
+const incoming = () => screen.getByRole("region", { name: "Incoming" });
+const outgoing = () => screen.getByRole("region", { name: "Outgoing" });
 const urlField = () => screen.getByRole("textbox", { name: "Webhook URL" });
 const saveButton = () => screen.getByRole("button", { name: "Save changes" });
 const avatar = () => screen.getByRole("img", { name: "Bot avatar" });
@@ -114,7 +128,7 @@ describe("Add and edit a bot", () => {
     showNewBot();
     expect(document.title).toBe("New chat bot");
     expect(screen.getByRole("heading", { level: 1, name: "Chat bot setup" })).toBeInTheDocument();
-    expect(screen.getByText("Connect a bot to your workspace and choose where updates are delivered.")).toBeInTheDocument();
+    expect(screen.getByText("Connect another app or service to your workspace as a bot.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Go Back" })).toHaveAttribute("href", "/account/bots");
 
     expect(nameField()).toHaveFocus();
@@ -127,14 +141,51 @@ describe("Add and edit a bot", () => {
     expect(urlField()).not.toBeRequired();
   });
 
+  it("says what comes in, the addresses each room gives the bot once it's added, and what goes out, the webhook URL, which is optional", () => {
+    showNewBot();
+    expect(incoming()).toHaveTextContent(
+      "Apps post in a room as the bot at two addresses the room gives it, one for text or a file and one that takes a Slack incoming webhook's payload." +
+        "Each room's addresses appear once you save the bot, which puts it in its rooms.",
+    );
+    expect(within(incoming()).queryAllByRole("textbox")).toEqual([]);
+    expect(within(outgoing()).getByRole("textbox", { name: "Webhook URL" })).toBe(urlField());
+    expect(urlField()).toHaveAccessibleDescription(
+      "Optional. Ember sends every message that @mentions the bot or is sent to it in a DM to this webhook URL, then posts whatever it answers within 30 seconds.",
+    );
+    // Name, then its rooms, then in, then out, then Save changes.
+    expect(nameField().compareDocumentPosition(roomsCard())).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(roomsCard().compareDocumentPosition(incoming())).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(incoming().compareDocumentPosition(outgoing())).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(outgoing().compareDocumentPosition(saveButton())).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
   it("saves the new bot as typed, then goes to the bots page, with no notice", async () => {
     const { user } = showNewBot();
     await user.type(nameField(), "Build Bot");
     await user.type(urlField(), "https://ci.example.com/hook");
     await user.click(saveButton());
     await waitFor(() => expect(location.pathname).toBe("/account/bots"));
-    expect(sent()).toEqual([["POST /api/account/bots", { name: "Build Bot", webhookUrl: "https://ci.example.com/hook" }]]);
+    expect(sent()).toEqual([["POST /api/account/bots", { name: "Build Bot", webhookUrl: "https://ci.example.com/hook", rooms: null }]]);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("puts a new bot in every room, or only the open rooms chosen, of those in the sidebar", async () => {
+    const { user } = showNewBot();
+    expect(roomsCard()).toHaveTextContent(`Rooms${ROOMS_EXPLAINED}`);
+    expect(within(roomsCard()).getByRole("group", { name: "Rooms" })).toHaveAccessibleDescription(ROOMS_EXPLAINED);
+    expect(everyRoom()).toBeChecked();
+    expect(roomBoxes()).toEqual([]);
+
+    await user.click(chosenRooms());
+    expect(roomBoxes()).toEqual([
+      ["general", false],
+      ["random", false],
+    ]);
+    await user.click(screen.getByRole("checkbox", { name: "random" }));
+    await user.type(nameField(), "Build Bot");
+    await user.click(saveButton());
+    await waitFor(() => expect(location.pathname).toBe("/account/bots"));
+    expect(sent()).toEqual([["POST /api/account/bots", { name: "Build Bot", webhookUrl: "", rooms: [RANDOM.id] }]]);
   });
 
   it("can't add the bot again until the server answers, and says why it refused, keeping what's typed", async () => {
@@ -172,7 +223,11 @@ describe("Add and edit a bot", () => {
     await user.click(saveButton());
     await waitFor(() => expect(location.pathname).toBe("/account/bots"));
     expect(vi.mocked(fetch)).toHaveBeenCalledWith("/api/account/bots", expect.objectContaining({ method: "POST" }));
-    expect(sentForm()).toEqual({ user: { name: "Build Bot", webhookUrl: "" }, avatar: expect.objectContaining({ name: "robot.png", type: "image/png" }), variant: expect.objectContaining({ type: "image/webp" }) });
+    expect(sentForm()).toEqual({
+      user: { name: "Build Bot", webhookUrl: "", rooms: null },
+      avatar: expect.objectContaining({ name: "robot.png", type: "image/png" }),
+      variant: expect.objectContaining({ type: "image/webp" }),
+    });
   });
 
   it("refuses a picture over 16 MB at once, saying so", async () => {
@@ -214,6 +269,91 @@ describe("Add and edit a bot", () => {
 
     answered(answer(BOT));
     await waitFor(() => expect(location.pathname).toBe("/account/bots"));
+  });
+
+  it("gives the commands that post to the bot's rooms as it, a room at a time, as the room menu chooses, each copied with the button beside it", async () => {
+    const random = { id: "0mgk3x2a9b4c5b", name: "random" };
+    serve({ loaded: () => answer({ ...BOT, rooms: [...BOT.rooms, random] }) });
+    const { user } = showSettings();
+    await loaded();
+    const menu = within(incoming()).getByRole("combobox", { name: "Room" });
+    expect(within(menu).getAllByRole("option").map((option) => option.textContent)).toEqual(["general", "random"]);
+    expect(menu).toHaveValue(BOT.rooms[0]!.id);
+
+    const commandsFor = ({ id, name }: { id: string; name: string }) => {
+      const room = within(incoming()).getByRole("group", { name });
+      const url = `http://localhost:3000/rooms/${id}/${BOT.key}`;
+      expect(within(room).getByRole("textbox", { name: "curl command for posting messages" })).toHaveValue(`curl -d 'Hello!' ${url}/messages`);
+      expect(within(room).getByRole("textbox", { name: "curl command for posting attachments" })).toHaveValue(`curl -F "attachment=@/path/to/file" ${url}/messages`);
+      expect(within(room).getByRole("textbox", { name: "Slack-compatible webhook URL" })).toHaveValue(`${url}/slack`);
+      return room;
+    };
+    commandsFor(BOT.rooms[0]!);
+    await user.selectOptions(menu, "random");
+    const shown = commandsFor(random);
+    expect(within(incoming()).queryByRole("group", { name: "general" })).not.toBeInTheDocument();
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    try {
+      await user.click(within(shown).getByRole("button", { name: "Copy Slack-compatible webhook URL" }));
+      expect(writeText).toHaveBeenCalledWith(`http://localhost:3000/rooms/${random.id}/${BOT.key}/slack`);
+    } finally {
+      Reflect.deleteProperty(navigator, "clipboard");
+    }
+    // Neither choosing a room nor copying saves the form.
+    expect(sent()).toEqual([]);
+  });
+
+  it("doesn't save the form for Enter in a command, which is there to be copied", async () => {
+    const { user } = showSettings();
+    await loaded();
+    await user.click(within(incoming()).getByRole("textbox", { name: "curl command for posting messages" }));
+    await user.keyboard("{Enter}");
+    expect(sent()).toEqual([]);
+    expect(location.pathname).toBe(`/account/bots/${BOT.id}/edit`);
+    // Where a field's Enter does.
+    await user.click(nameField());
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(location.pathname).toBe("/account/bots"));
+  });
+
+  it("says a bot in no rooms has no addresses yet", async () => {
+    serve({ loaded: () => answer({ ...BOT, rooms: [] }) });
+    showSettings();
+    await loaded();
+    expect(within(incoming()).getByText("It isn't in any rooms, so it has no addresses yet.")).toBeInTheDocument();
+    expect(within(incoming()).queryByRole("combobox")).not.toBeInTheDocument();
+  });
+
+  it("shows a bot kept to the rooms picked as it's kept, one the sidebar lacks among them, and saves just a change to them", async () => {
+    const launch = { id: "0mgk3x2a9b4c5d", name: "launch" };
+    serve({ loaded: () => answer({ ...BOT, pickedRooms: [{ id: GENERAL.id, name: "general" }, launch] }) });
+    const { user } = showSettings();
+    await loaded();
+    expect(chosenRooms()).toBeChecked();
+    expect(roomBoxes()).toEqual([
+      ["general", true],
+      ["launch", true],
+      ["random", false],
+    ]);
+
+    await user.click(screen.getByRole("checkbox", { name: "general" }));
+    await user.click(screen.getByRole("checkbox", { name: "random" }));
+    await user.click(saveButton());
+    await waitFor(() => expect(location.pathname).toBe("/account/bots"));
+    expect(sent()).toEqual([[`PATCH /api/account/bots/${BOT.id}`, { rooms: [launch.id, RANDOM.id] }]]);
+  });
+
+  it("puts a bot kept to the rooms picked in every room again", async () => {
+    serve({ loaded: () => answer({ ...BOT, pickedRooms: [{ id: GENERAL.id, name: "general" }] }) });
+    const { user } = showSettings();
+    await loaded();
+    await user.click(everyRoom());
+    expect(roomBoxes()).toEqual([]);
+    await user.click(saveButton());
+    await waitFor(() => expect(location.pathname).toBe("/account/bots"));
+    expect(sent()).toEqual([[`PATCH /api/account/bots/${BOT.id}`, { rooms: null }]]);
   });
 
   it("shows no webhook URL for a bot without a webhook", async () => {

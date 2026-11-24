@@ -1,12 +1,18 @@
 import {
+  CloseCode,
   CURRENT_PASSWORD_WRONG,
   MEMBERFUL_CALLBACK_PATH,
   MEMBERFUL_CONNECTIONS_PATH,
+  MEMBERFUL_DISCONNECT_PASSWORD_NEEDED,
+  MEMBERFUL_DISCONNECT_WITHOUT_EMAIL,
+  MEMBERFUL_DISCONNECT_WITHOUT_PASSWORD,
+  MEMBERFUL_NOT_CONNECTED,
   MEMBERFUL_PASSWORD_NEEDED,
   MEMBERFUL_SIGN_IN_NEEDED,
   MEMBERFUL_SIGN_IN_PROBLEMS,
   MEMBERFUL_WEBHOOK_PATH,
   memberfulSignInPath,
+  PASSWORD_WITH_MEMBERFUL,
   SIGN_IN_LIMITED,
   SIGN_IN_REJECTED,
   type Account,
@@ -16,6 +22,7 @@ import {
   type Me,
   type MemberfulConnection,
   type MemberfulConnectionStart,
+  type MemberfulDisconnection,
   type NewWorkspace,
   type Profile,
   type ProfileAnswer,
@@ -42,6 +49,7 @@ import {
   freshDeploy,
   openWorkspaceSocket,
   origin,
+  pushBrowser,
   shown,
   signIn,
   withWorkspaceEnv,
@@ -266,15 +274,24 @@ const account = (memberful: Partial<Pick<Account, "memberfulJoin" | "memberfulSi
   hideTranslationButtons: true,
   customStyles: "",
   restrictRoomCreation: false,
+  restrictChannelMentions: false,
+  restrictEveryoneMention: false,
+  warnBeforeNotifying: true,
   logo: null,
   customDomain: null,
   joinLink: true,
   openSignUp: false,
   memberfulJoin: false,
   memberfulSignIn: false,
+  ssoJoin: false,
+  ssoSignIn: false,
   emailDomainSignUp: false,
   emailDomains: [],
   navigationIcons: {},
+  huddles: false,
+  huddleCameras: true,
+  huddleScreens: true,
+  huddleVideo: "hd",
   ...memberful,
 });
 
@@ -362,7 +379,7 @@ describe("Sign in with Memberful", () => {
       for (const settings of [{ memberfulJoin: true }, { memberfulSignIn: true }]) {
         const refused = await change(administrator, { settings }, { keys: false });
         expect(refused.status).toBe(422);
-        expect(await refused.json()).toEqual({ error: "Memberful needs MEMBERFUL_URL, MEMBERFUL_CLIENT_ID and MEMBERFUL_CLIENT_SECRET set first" });
+        expect(await refused.json()).toEqual({ error: "Set up Memberful first, which gives Ember your Memberful site's keys." });
       }
       expect((await bootstrap()).account).toEqual(account());
 
@@ -627,12 +644,12 @@ describe("Sign in with Memberful", () => {
   });
 
   describe("coming back from Memberful", () => {
-    it("signs in someone new with an active membership as a member in every open room, linked to their Memberful account", async () => {
+    it("signs in someone new with an active membership as a member in every open room, linked to their Memberful account, by way of the welcome page", async () => {
       await setUpWithMemberful();
       const site = fakeMemberful();
       const response = await signInWithMemberful({ returnTo: "/rooms/abc?tab=pins#latest" });
       expect(response.status).toBe(302);
-      expect(locationOf(response)).toBe(`${origin}/rooms/abc?tab=pins#latest`);
+      expect(locationOf(response)).toBe(`${origin}/welcome?return_to=%2Frooms%2Fabc%3Ftab%3Dpins%23latest`);
       expect(response.headers.get("Cache-Control")).toBe("no-store");
       expect(response.headers.getSetCookie()).toEqual([
         expect.stringMatching(/^__Host-session_token=[\w-]{43}; Path=\/; Max-Age=34560000; HttpOnly; SameSite=Lax; Secure$/),
@@ -641,16 +658,16 @@ describe("Sign in with Memberful", () => {
 
       const user = await signedInAs(response);
       expect(user).toEqual({ id: expect.any(String), name: "Katherine Johnson", administrator: false });
-      const [stored] = (await workspaceSql("SELECT name, email_address, password_digest, role, status, guest FROM users WHERE id = ?", user.id)) as Array<
+      const [stored] = (await workspaceSql("SELECT name, username, email_address, password_digest, role, status, guest FROM users WHERE id = ?", user.id)) as Array<
         Record<string, unknown>
       >;
-      expect(stored).toEqual({ name: "Katherine Johnson", email_address: "katherine@example.com", password_digest: null, role: 0, status: 0, guest: 0 });
+      expect(stored).toEqual({ name: "Katherine Johnson", username: "katherinejohnson", email_address: "katherine@example.com", password_digest: null, role: 0, status: 0, guest: 0 });
       expect(await identities()).toEqual([{ issuer: SITE, subject: "4242", user_id: user.id }]);
       expect(await workspaceSql("SELECT ip_address, user_agent FROM sessions WHERE user_id = ?", user.id)).toEqual([
         { ip_address: IP, user_agent: "Katherine's laptop" },
       ]);
       const { rooms } = (await (await api("/api/sidebar", { headers: { Cookie: cookieOf(response) } })).json()) as Sidebar;
-      expect(rooms.map((room) => room.kind !== "direct" && room.name)).toEqual(["general", "random"]);
+      expect(rooms.flatMap((room) => (room.kind !== "direct" ? [room.name] : []))).toEqual(["general", "random"]);
 
       // The code went to Memberful's token endpoint with the app's keys, and the token to its member API, neither following a redirect.
       expect(site.requests.map(({ method, url, redirect }) => [method, new URL(url).pathname, redirect])).toEqual([
@@ -667,7 +684,7 @@ describe("Sign in with Memberful", () => {
       expect(new URL(site.requests[1]!.url).searchParams.get("query")).toContain("currentMember");
     });
 
-    it("tells everyone's workspace sockets of someone new, as the people directory lists them", async () => {
+    it("tells everyone's workspace sockets of someone new, as the people directory lists them, and of the DM welcoming them", async () => {
       const administrator = await setUpWithMemberful();
       fakeMemberful();
       const workspace = await openWorkspaceSocket(administrator);
@@ -677,14 +694,22 @@ describe("Sign in with Memberful", () => {
       const listed = users.find((person) => person.id === user.id);
       expect(listed).toMatchObject({ name: "Katherine Johnson", role: "member", status: "active" });
       expect(await workspace.next()).toEqual({ type: "user.updated", user: listed });
+      // As joining with the join link starts one (join.test.ts).
+      const { rooms } = (await (await api("/api/sidebar", { headers: { Cookie: administrator.cookie } })).json()) as Sidebar;
+      const welcome = rooms.find((room) => room.kind === "direct")!;
+      expect(welcome).toMatchObject({ joined: { userId: user.id }, members: expect.arrayContaining([{ id: user.id, name: "Katherine Johnson" }]) });
+      const { unread: _, involvement: __, ...room } = welcome;
+      expect(await workspace.next()).toEqual({ type: "room.saved", room });
     });
 
-    it("signs the same person in again by their Memberful account, whatever its name and email address are now", async () => {
+    it("signs the same person in again by their Memberful account, whatever its name and email address are now, straight to the page they signed in from", async () => {
       await setUpWithMemberful();
       const site = fakeMemberful();
       const first = await signedInAs(await signInWithMemberful());
       site.member = { ...katherine, fullName: "Katherine G. Johnson", email: "kgj@example.com" };
-      expect(await signedInAs(await signInWithMemberful())).toEqual(first);
+      const again = await signInWithMemberful({ returnTo: "/rooms/abc" });
+      expect(locationOf(again)).toBe(`${origin}/rooms/abc`);
+      expect(await signedInAs(again)).toEqual(first);
       expect(await count("users")).toBe(2);
       expect(await count("identities")).toBe(1);
       expect(await workspaceSql("SELECT count(*) AS n FROM sessions WHERE user_id = ?", first.id)).toEqual([{ n: 2 }]);
@@ -757,6 +782,69 @@ describe("Sign in with Memberful", () => {
       expect((await signedInAs(await signInWithMemberful())).name).toBe("Member");
     });
 
+    it("gives someone new a username from their name, or with the first number that makes it nobody's, nor @ember's or an agent's name", async () => {
+      const administrator = await setUpWithMemberful();
+      const site = fakeMemberful();
+      const usernameOf = async (response: Response) =>
+        ((await workspaceSql("SELECT username FROM users WHERE id = ?", (await signedInAs(response)).id)) as Array<{ username: string | null }>)[0]!.username;
+      expect(await usernameOf(await signInWithMemberful())).toBe("katherinejohnson");
+      site.member = { ...katherine, id: "4243", email: "kj2@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("katherinejohnson2");
+      // One someone picked, in another's place, is passed over too, as one past the next free number is.
+      await workspaceSql("UPDATE users SET username = 'katherinejohnson4' WHERE id = ?", administrator.user.id);
+      site.member = { ...katherine, id: "4244", email: "kj3@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("katherinejohnson3");
+      site.member = { ...katherine, id: "4245", email: "kj4@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("katherinejohnson5");
+      site.member = { ...katherine, id: "4246", fullName: "Ember!", email: "ember.fan@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("ember2");
+      site.member = { ...katherine, id: "4247", fullName: "Émilie du Châtelet", email: "emilie@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("emilieduchatelet");
+      site.member = { ...katherine, id: "4248", fullName: "李白", email: "li@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("member");
+    });
+
+    it("passes over an AI agent's name too, even while Ember AI is off", async () => {
+      const administrator = await setUpWithMemberful();
+      // As making an agent called `name` leaves it once Ember AI is turned off.
+      const agentCalled = async (id: string, name: string) => {
+        const now = new Date().toISOString();
+        await workspaceSql("INSERT INTO users (id, name, role, status, created_at, updated_at) VALUES (?, ?, 2, 1, ?, ?)", id, name, now, now);
+        await workspaceSql(
+          `INSERT INTO agents (user_id, description, instructions, model, model_name, format, thinking, answer_length, every_open_room, created_by, updated_by, created_at, updated_at)
+            VALUES (?1, 'Sums up threads', 'Sum up.', 'anthropic/claude-haiku-5.5', 'Claude Haiku 5.5', 'messages', 'off', 'short', 1, ?2, ?2, ?3, ?3)`,
+          id,
+          administrator.user.id,
+          now,
+        );
+      };
+      await agentCalled("0agent", "katherine johnson");
+      const site = fakeMemberful();
+      expect((await signedInAs(await signInWithMemberful())).name).toBe("katherine");
+      site.member = { ...katherine, id: "4243", email: null };
+      expect((await signedInAs(await signInWithMemberful())).name).toBe("Member");
+      await agentCalled("1agent", "MEMBER");
+      // Nor is anyone's username an agent's name.
+      await agentCalled("2agent", "member2");
+      site.member = { ...katherine, id: "4244", email: null };
+      const unnamed = await signedInAs(await signInWithMemberful());
+      expect(unnamed.name).toBe("Member 2");
+      expect(await workspaceSql("SELECT username FROM users WHERE id = ?", unnamed.id)).toEqual([{ username: "member22" }]);
+    });
+
+    it("passes over a name with a blocked word, but calls someone new Member even with that blocked", async () => {
+      const administrator = await setUpWithMemberful();
+      const blocked = await api("/api/account", { method: "PATCH", headers: as(administrator), body: JSON.stringify({ blockedWords: ["johnson", "member"] }) });
+      expect(blocked.status).toBe(200);
+      const site = fakeMemberful();
+      expect((await signedInAs(await signInWithMemberful())).name).toBe("katherine");
+      // "Member" is Ember's word, not theirs, so blocking it can't leave them nameless, though their username passes over it.
+      site.member = { ...katherine, id: "4243", email: null };
+      const unnamed = await signedInAs(await signInWithMemberful());
+      expect(unnamed.name).toBe("Member");
+      expect(await workspaceSql("SELECT username FROM users WHERE id = ?", unnamed.id)).toEqual([{ username: "member2" }]);
+    });
+
     it("signs nobody in with a state this browser didn't start with, or without a code, and asks Memberful nothing", async () => {
       await setUpWithMemberful();
       const site = fakeMemberful();
@@ -821,17 +909,29 @@ describe("Sign in with Memberful", () => {
     it("goes home, rather than to another site or a page that isn't the workspace's, after signing in", async () => {
       await setUpWithMemberful();
       fakeMemberful();
+      // Someone new goes by way of the welcome page, which has nowhere else to go on to either.
+      expect(locationOf(await signInWithMemberful({ returnTo: "https://example.com/rooms/abc" }))).toBe(`${origin}/welcome`);
       // The last is short, but too long to keep once its address escapes it.
       for (const returnTo of [
         "https://example.com/rooms/abc",
         "//example.com/rooms/abc",
         "/api/me",
+        "/welcome/",
         `/rooms/${"a".repeat(1024)}`,
         `/rooms/abc?q=${"é".repeat(200)}`,
       ]) {
         expect(locationOf(await signInWithMemberful({ returnTo })), returnTo).toBe(`${origin}/`);
       }
       expect(locationOf(await signInWithMemberful())).toBe(`${origin}/`);
+    });
+
+    it("comes back to the welcome page for a member whose session ended there, which checks where it goes on to itself", async () => {
+      await setUpWithMemberful();
+      fakeMemberful();
+      expect(locationOf(await signInWithMemberful())).toBe(`${origin}/welcome`);
+      for (const returnTo of ["/welcome?return_to=%2Frooms%2Fabc", "/welcome"]) {
+        expect(locationOf(await signInWithMemberful({ returnTo })), returnTo).toBe(`${origin}${returnTo}`);
+      }
     });
 
     it("signs nobody new in once an administrator has turned it off, nor anyone once the deployment has lost the keys", async () => {
@@ -874,6 +974,39 @@ const subscriptionChanged = (member: { id: string }, event = "subscription.deact
   event,
   subscription: { id: 101, active: false, autorenew: false, member: { id: Number(member.id), email: "someone@example.com" } },
 });
+
+/**
+ * Every webhook Memberful sends, each as its webhook event reference shows its payload
+ * (memberful.com/docs/api-reference/webhook-event-reference): those about a member, `member`, naming them
+ * by their id, a number, as a member's own events, their subscriptions' and their orders' do, and those
+ * about nobody's membership, a plan's price's, which it sends as `subscription`, and a download's.
+ */
+function memberfulEvents(member: { id: string }) {
+  const id = Number(member.id);
+  const about = { id, email: "someone@example.com", first_name: "Someone", full_name: "Someone Else", unrestricted_access: false };
+  const pass = { id: 7, name: "Members" };
+  const subscription = { id: 101, active: true, autorenew: true, member_id: id, member: about, pass, subscription_plan: { id: 3, label: "$10/month", name: "Monthly" } };
+  const order = { uuid: "4DACB7B0-B728-0130-F9E8-102B343DC979", number: "4DACB7B0", total: 9900, member: about, products: [], subscriptions: [{ id: 101, active: true, pass }] };
+  const plan = { id: 3, price: 1000, name: "Monthly", label: "$10/month", renewal_period: "monthly", for_sale: true, pass, type: "standard_plan" };
+  const product = { id: 5, name: "Sample download", price: 1000, for_sale: true, type: "download" };
+  return {
+    aboutMember: [
+      { event: "member_signup", member: about },
+      { event: "member_updated", member: about, changed: { email: ["old_email@example.com", about.email] } },
+      { event: "member.deleted", member: { deleted: true, id } },
+      { event: "tax_id.updated", member: about, tax_id: { country: "FR", type: "eu_vat", value: "FR1234567890" } },
+      { event: "custom_fields.updated", member: about, custom_fields: [{ field: { id: 1, label: "T-shirt size" }, value: "M" }] },
+      ...["created", "updated", "activated", "reactivated", "deactivated", "deleted"].map((change) => ({ event: `subscription.${change}`, subscription })),
+      // A renewal's order names nobody: its subscription does.
+      { event: "subscription.renewed", subscription, order: { uuid: order.uuid, status: "completed", total: 9900 } },
+      ...["purchased", "refunded", "suspended", "completed"].map((status) => ({ event: `order.${status}`, order: { ...order, status } })),
+    ],
+    aboutNobody: [
+      ...["created", "updated", "deleted"].map((change) => ({ event: `subscription_plan.${change}`, subscription: plan })),
+      ...["created", "updated", "deleted"].map((change) => ({ event: `download.${change}`, product })),
+    ],
+  };
+}
 
 /** A test run while the Workspace has every Memberful key too, as a deployment that hears Memberful's webhooks does. */
 const hearingWebhooks = (run: () => Promise<void>) => () => withWorkspaceEnv(ALL_KEYS, run);
@@ -941,7 +1074,7 @@ describe("Memberful memberships", () => {
       for (const keys of [KEYS, { ...ALL_KEYS, MEMBERFUL_API_KEY: undefined }, { ...ALL_KEYS, MEMBERFUL_WEBHOOK_SECRET: "" }]) {
         expect((await webhook(subscriptionChanged(katherine), { keys })).status).toBe(404);
       }
-      expect(errors).toHaveBeenCalledWith("A Memberful webhook came, but the deployment lacks MEMBERFUL_WEBHOOK_SECRET or MEMBERFUL_API_KEY, so it's refused");
+      expect(errors).toHaveBeenCalledWith("A Memberful webhook came, but Ember lacks the webhook's secret or the custom app's API key, so it's refused");
     });
 
     it(
@@ -974,7 +1107,7 @@ describe("Memberful memberships", () => {
           { event: "order.suspended", order: { uuid: "an-order", member: { id: 4242 } } },
         ];
         for (const payload of named) {
-          expect((await webhook(payload)).status).toBe(204);
+          expect((await webhook(payload)).status).toBe(200);
           await checked();
           expect(askedAfter(site.requests).at(-1), payload.event).toEqual(["4242"]);
         }
@@ -987,11 +1120,34 @@ describe("Memberful memberships", () => {
           body: JSON.stringify({ role: "administrator" }),
         });
         expect(promoted.status).toBe(200);
-        for (const payload of [subscriptionChanged({ id: "9999" }), subscriptionChanged(dorothy), { event: "subscription_plan.updated", subscription_plan: { id: 3 } }, "not an object"]) {
-          expect((await webhook(payload)).status).toBe(204);
+        const planChanged = { event: "subscription_plan.updated", subscription: { id: 3, name: "Monthly", pass: { id: 1, name: "Members" } } };
+        for (const payload of [subscriptionChanged({ id: "9999" }), subscriptionChanged(dorothy), planChanged, "not an object"]) {
+          expect((await webhook(payload)).status).toBe(200);
         }
         expect(await queuedChecks()).toEqual([]);
         expect(site.requests.slice(asked).filter(({ url }) => url === `${SITE}/api/graphql`)).toEqual([]);
+      }),
+    );
+
+    it(
+      "answer 200 to every event Memberful sends, checking the membership of the member one is about, whatever it's called, and nobody's for one about a plan, a download or nothing Ember knows of",
+      hearingWebhooks(async () => {
+        await setUpWithMemberful();
+        const site = fakeMemberful();
+        await memberfulSession();
+        const { aboutMember, aboutNobody } = memberfulEvents(katherine);
+        for (const payload of aboutMember) {
+          const asked = askedAfter(site.requests).length;
+          expect((await webhook(payload)).status, payload.event).toBe(200);
+          await checked();
+          expect(askedAfter(site.requests).slice(asked), payload.event).toEqual([["4242"]]);
+        }
+
+        const asked = site.requests.length;
+        const unheardOf = [{ event: "member.renamed", account: { id: 4242 } }, { event: "something.new" }, {}, []];
+        for (const payload of [...aboutNobody, ...unheardOf]) expect((await webhook(payload)).status, JSON.stringify(payload)).toBe(200);
+        expect(await queuedChecks()).toEqual([]);
+        expect(site.requests.slice(asked)).toEqual([]);
       }),
     );
 
@@ -1003,7 +1159,7 @@ describe("Memberful memberships", () => {
         const { id } = (await memberfulSession()).user;
         await turnMemberful(administrator, false);
         site.member = { ...katherine, subscriptions: [{ active: false }] };
-        expect((await webhook(subscriptionChanged(katherine))).status).toBe(204);
+        expect((await webhook(subscriptionChanged(katherine))).status).toBe(200);
         await checked();
         expect(await statusOf(administrator, id)).toBe("suspended");
       }),
@@ -1014,9 +1170,9 @@ describe("Memberful memberships", () => {
       hearingWebhooks(async () => {
         const administrator = await setUpWithMemberful();
         fakeMemberful();
-        expect((await webhook(subscriptionChanged(katherine))).status).toBe(204);
+        expect((await webhook(subscriptionChanged(katherine))).status).toBe(200);
         await turnMemberful(administrator, false);
-        expect((await webhook(subscriptionChanged(katherine))).status).toBe(204);
+        expect((await webhook(subscriptionChanged(katherine))).status).toBe(200);
         expect(await queuedChecks()).toEqual([]);
         expect(await count("membership_catch_ups")).toBe(0);
 
@@ -1042,7 +1198,7 @@ describe("Memberful memberships", () => {
         const rooms = await count("memberships");
 
         site.member = { ...katherine, subscriptions: [{ active: false }] };
-        expect((await webhook(subscriptionChanged(katherine))).status).toBe(204);
+        expect((await webhook(subscriptionChanged(katherine))).status).toBe(200);
         expect((await theirs.closed).code).toBe(4003);
         await checked();
         expect(await statusOf(administrator, id)).toBe("suspended");
@@ -1318,7 +1474,7 @@ describe("Memberful memberships", () => {
 
         site.member = { ...katherine, subscriptions: [{ active: false }] };
         site.held = Promise.resolve();
-        expect((await webhook(subscriptionChanged(katherine))).status).toBe(204);
+        expect((await webhook(subscriptionChanged(katherine))).status).toBe(200);
         answered.resolve();
         await checking;
         await checked();
@@ -1496,6 +1652,38 @@ const profileOf = async (session: Session, { keys = true } = {}): Promise<Profil
 
 /** Grace's account at the Memberful site, with an active subscription. */
 const gracesAccount: Partial<MemberfulMember> = { id: "4250", email: grace.emailAddress, fullName: grace.name };
+/** The same, as her profile names it once it's connected. */
+const GRACES = { name: grace.name, emailAddress: grace.emailAddress };
+
+/** Disconnects Memberful from `session`'s profile with `body`, from `ip`, on a deployment with the keys unless `keys` is false. */
+const disconnect = (session: Session | null, body: MemberfulDisconnection = {}, { ip = IP, keys = true } = {}) =>
+  apiWith(keys ? KEYS : {}, MEMBERFUL_CONNECTIONS_PATH, { method: "DELETE", headers: { ...as(session), "CF-Connecting-IP": ip }, body: JSON.stringify(body) });
+
+/** Connects Grace's Memberful account from `member`'s profile, her session, with her password, `password`, at a fake Memberful site that describes it. */
+async function connectGrace(member: Session, password = grace.password): Promise<ReturnType<typeof fakeMemberful>> {
+  const site = fakeMemberful(gracesAccount);
+  expect(locationOf(await finish(await connectionOf(await connect(member, { currentPassword: password })), member))).toBe(backToProfile("connected"));
+  return site;
+}
+
+/** Saves `session`'s profile as its form does, with `changes`, on a deployment with the keys, or with `keys`. */
+const saveProfile = (session: Session, changes: unknown, keys: Partial<Env> = KEYS) =>
+  apiWith(keys, "/api/users/me/profile", { method: "PATCH", headers: as(session), body: JSON.stringify(changes) });
+
+/** Every linked account, with what it says of itself. */
+const linkedAccounts = () => workspaceSql("SELECT issuer, subject, user_id, name, email_address FROM identities");
+
+/** Where Chrome's push service takes the pushes of a subscription labelled `label`. */
+const endpointOf = (label: string) => `https://fcm.googleapis.com/fcm/send/${label}`;
+
+/** Saves a push subscription for `session`, at `endpointOf(label)`. */
+async function subscribe(session: Session, label: string): Promise<void> {
+  const { p256dh, auth } = await pushBrowser();
+  const body = JSON.stringify({ endpoint: endpointOf(label), p256dhKey: p256dh, authKey: auth });
+  expect((await api("/api/push-subscriptions", { method: "POST", headers: as(session), body })).status).toBe(204);
+}
+
+const subscriptions = () => workspaceSql("SELECT user_id, endpoint FROM push_subscriptions ORDER BY endpoint");
 
 /** Sets Ember up with Ada as its administrator and Grace, who joined with a password, then makes Memberful members only. */
 async function setUpWithGrace(): Promise<{ administrator: Session; member: Session }> {
@@ -1516,8 +1704,8 @@ describe("Connect Memberful", () => {
       expect((await profileOf(member)).memberful).toBeNull();
 
       await turnMemberful(administrator, true);
-      expect((await profileOf(member)).memberful).toBe(false);
-      expect((await profileOf(administrator)).memberful).toBe(false);
+      expect((await profileOf(member)).memberful).toEqual({ membersOnly: true, connected: null });
+      expect((await profileOf(administrator)).memberful).toEqual({ membersOnly: true, connected: null });
       expect((await profileOf(member, { keys: false })).memberful).toBeNull();
       // Signed in with just a name, they have nothing to connect.
       expect((await profileOf(guest)).memberful).toBeNull();
@@ -1534,7 +1722,7 @@ describe("Connect Memberful", () => {
       expect(back.headers.getSetCookie()).toEqual([expect.stringMatching(/memberful_state=;/)]);
       expect(await identities()).toEqual([{ issuer: SITE, subject: "4250", user_id: member.user.id }]);
       expect(await signsIn(member)).toBe(true);
-      expect((await profileOf(member)).memberful).toBe(true);
+      expect((await profileOf(member)).memberful).toEqual({ membersOnly: true, connected: GRACES });
       expect(await count("pending_identities")).toBe(0);
 
       // From then on she signs in with Memberful as herself, and has nothing more to connect.
@@ -1692,6 +1880,19 @@ describe("Connect Memberful", () => {
       expect(replayed.headers.getSetCookie()).toEqual([expect.stringMatching(/memberful_state=;/)]);
     });
 
+    it("is forgotten once the account is disconnected, so that it can't connect one again", async () => {
+      const { member } = await setUpWithGrace();
+      fakeMemberful(gracesAccount);
+      // Started in one browser, while another connects the account and disconnects it.
+      const started = await connectionOf(await connect(member, { currentPassword: grace.password }));
+      await connectGrace(member);
+      expect(await count("pending_identities")).toBe(1);
+      expect((await disconnect(member, { currentPassword: grace.password })).status).toBe(200);
+      expect(await count("pending_identities")).toBe(0);
+      expect(locationOf(await finish(started, member))).toBe(backToProfile("failed"));
+      expect(await identities()).toEqual([]);
+    });
+
     it("is forgotten once the password that started it is changed, or reset", async () => {
       const { member } = await setUpWithGrace();
       fakeMemberful(gracesAccount);
@@ -1776,5 +1977,308 @@ describe("Connect Memberful", () => {
       expect((await connectionOf(there)).cookie).toMatch(/^__Host-memberful_state=/);
       expect(await count("pending_identities")).toBe(1);
     });
+  });
+});
+
+describe("The Memberful account connected", () => {
+  it("is named on your profile as Memberful describes it, whether or not Memberful is members only", async () => {
+    const { administrator, member } = await setUpWithGrace();
+    await connectGrace(member);
+    expect(await linkedAccounts()).toEqual([{ issuer: SITE, subject: "4250", user_id: member.user.id, name: grace.name, email_address: grace.emailAddress }]);
+    expect((await profileOf(member)).memberful).toEqual({ membersOnly: true, connected: GRACES });
+    // Her password signs her in again, but so does Memberful, and the section says so.
+    await turnMemberful(administrator, true, { membersOnly: false });
+    expect((await profileOf(member)).memberful).toEqual({ membersOnly: false, connected: GRACES });
+    await turnMemberful(administrator, false);
+    expect((await profileOf(member)).memberful).toEqual({ membersOnly: false, connected: GRACES });
+    // Though not to a deployment without the keys, where there's no Memberful site.
+    expect((await profileOf(member, { keys: false })).memberful).toBeNull();
+    expect((await profileOf(administrator)).memberful).toBeNull();
+  });
+
+  it("is described anew each time it signs you in, and as nothing until then for one connected before Ember kept that", async () => {
+    const { member } = await setUpWithGrace();
+    const site = await connectGrace(member);
+    await workspaceSql("UPDATE identities SET name = NULL, email_address = NULL");
+    expect((await profileOf(member)).memberful).toEqual({ membersOnly: true, connected: { name: null, emailAddress: null } });
+
+    site.member = { ...site.member!, fullName: "Grace Brewster Murray Hopper", email: "grace@navy.example" };
+    expect((await signedInAs(await signInWithMemberful())).id).toBe(member.user.id);
+    expect((await profileOf(member)).memberful).toEqual({ membersOnly: true, connected: { name: "Grace Brewster Murray Hopper", emailAddress: "grace@navy.example" } });
+    expect(await linkedAccounts()).toEqual([{ issuer: SITE, subject: "4250", user_id: member.user.id, name: "Grace Brewster Murray Hopper", email_address: "grace@navy.example" }]);
+  });
+
+  it("is named for someone who joined with Memberful too, who signs in with it alone", async () => {
+    await setUpWithMemberful({ membersOnly: false });
+    fakeMemberful();
+    const session = await memberfulSession();
+    expect((await profileOf(session)).memberful).toEqual({ membersOnly: false, connected: { name: katherine.fullName, emailAddress: katherine.email } });
+    expect((await profileOf(session)).password).toBe(false);
+  });
+
+  it("goes without a name when Memberful has no full name for it, though the person is named here by their email address", async () => {
+    await setUpWithMemberful({ membersOnly: false });
+    const site = fakeMemberful();
+    const session = await memberfulSessionOf({ ...katherine, id: "4243", fullName: null, email: "dorothy@example.com" }, site);
+    expect(session.user.name).toBe("dorothy");
+    expect((await profileOf(session)).memberful).toEqual({ membersOnly: false, connected: { name: null, emailAddress: "dorothy@example.com" } });
+  });
+});
+
+describe("A new password", () => {
+  it("disconnects the Memberful account connected with the one it replaces, as a reset does", async () => {
+    const { member } = await setUpWithGrace();
+    const site = await connectGrace(member);
+    const changed = await saveProfile(member, { password: "a new password", currentPassword: grace.password });
+    expect(changed.status).toBe(200);
+    expect(((await changed.json()) as ProfileAnswer).profile.memberful).toEqual({ membersOnly: true, connected: null });
+    expect(await identities()).toEqual([]);
+    expect(await signsIn(member)).toBe(true);
+    // Memberful knows her account, but it's connected to nobody here, and her email address is hers.
+    expect(locationOf(await signInWithMemberful())).toBe(backToSignIn("taken"));
+
+    await connectGrace(member, "a new password");
+    await runInDurableObject(workspaceStub(), (workspace: Workspace) => workspace.resetPassword(grace.emailAddress, "recovery digest"));
+    expect(await identities()).toEqual([]);
+    expect(await signsIn(member)).toBe(false);
+    expect(locationOf(await signInWithMemberful())).toBe(backToSignIn("taken"));
+    void site;
+  });
+
+  it("is refused to someone without one whom Memberful signs in, as it does while the deployment has its keys, whether or not Memberful is on", async () => {
+    const administrator = await setUpWithMemberful({ membersOnly: false });
+    fakeMemberful();
+    const session = await memberfulSession();
+    const elsewhere = await memberfulSession();
+    for (const on of [true, false]) {
+      await turnMemberful(administrator, on, { membersOnly: false });
+      for (const changes of [{ password: "a long enough password" }, { password: "a long enough password", emailAddress: "katherine@nasa.example" }]) {
+        const refused = await saveProfile(session, changes);
+        expect(refused.status).toBe(422);
+        expect(await refused.json()).toEqual({ error: PASSWORD_WITH_MEMBERFUL });
+      }
+    }
+    // Nothing was saved, and their other sessions go on, as a new password would end them.
+    expect(await profileOf(session)).toMatchObject({ password: false, emailAddress: katherine.email });
+    expect(await signsIn(elsewhere)).toBe(true);
+    expect(await identities()).toEqual([{ issuer: SITE, subject: katherine.id, user_id: session.user.id }]);
+    // The rest of their profile is theirs to change as before, their email address included.
+    expect((await saveProfile(session, { emailAddress: "katherine@nasa.example" })).status).toBe(200);
+    expect((await signedInAs(await signInWithMemberful())).id).toBe(session.user.id);
+  });
+
+  it("keeps the Memberful account of someone without a password, as they set their first where Memberful doesn't sign them in", async () => {
+    await setUpWithMemberful({ membersOnly: false });
+    fakeMemberful();
+    const session = await memberfulSession();
+    // At another Memberful site, where they'd be someone new, as at a deployment without the keys.
+    const saved = await saveProfile(session, { password: "a long enough password" }, { ...KEYS, MEMBERFUL_URL: "https://another.memberful.com/" });
+    expect(saved.status, await saved.clone().text()).toBe(200);
+    expect(((await saved.json()) as ProfileAnswer).profile.password).toBe(true);
+    expect(await identities()).toEqual([{ issuer: SITE, subject: katherine.id, user_id: session.user.id }]);
+    // Back at the site, either signs them in.
+    expect((await signedInAs(await signInWithMemberful())).id).toBe(session.user.id);
+    expect((await signInWithPassword({ emailAddress: katherine.email, password: "a long enough password" })).status).toBe(201);
+  });
+
+  it("is someone's first to set at a deployment without Memberful's keys, which has no Memberful to sign them in", async () => {
+    await setUpWithMemberful({ membersOnly: false });
+    fakeMemberful();
+    const session = await memberfulSession();
+    const saved = await saveProfile(session, { password: "a long enough password" }, {});
+    expect(saved.status, await saved.clone().text()).toBe(200);
+    expect(((await saved.json()) as ProfileAnswer).profile).toMatchObject({ password: true, memberful: null });
+    expect(await identities()).toEqual([{ issuer: SITE, subject: katherine.id, user_id: session.user.id }]);
+  });
+
+  it("keeps the Memberful account of someone without an email address, which their password can't sign them in without, until they add one", async () => {
+    await setUpWithMemberful({ membersOnly: false });
+    const site = fakeMemberful();
+    const session = await memberfulSessionOf({ ...katherine, id: "4243", fullName: "Dorothy Vaughan", email: null }, site);
+    const linked = [{ issuer: SITE, subject: "4243", user_id: session.user.id }];
+    // Her first, where Memberful doesn't sign her in.
+    expect((await saveProfile(session, { password: "a long enough password" }, {})).status).toBe(200);
+    const changed = await saveProfile(session, { password: "another long password", currentPassword: "a long enough password" });
+    expect(changed.status).toBe(200);
+    expect(((await changed.json()) as ProfileAnswer).profile.memberful).toEqual({ membersOnly: false, connected: { name: "Dorothy Vaughan", emailAddress: null } });
+    expect(await identities()).toEqual(linked);
+    // A new password saved with an email address, which it can sign them in by, disconnects it.
+    const withEmail = await saveProfile(session, { emailAddress: "dorothy@example.com", password: "a third long password", currentPassword: "another long password" });
+    expect(withEmail.status).toBe(200);
+    // Nothing to show anymore, since Memberful isn't members only.
+    expect(((await withEmail.json()) as ProfileAnswer).profile.memberful).toBeNull();
+    expect(await identities()).toEqual([]);
+    expect((await signInWithPassword({ emailAddress: "dorothy@example.com", password: "a third long password" })).status).toBe(201);
+  });
+
+  it("stops the sign-in page offering Memberful once nobody is connected to it and Memberful is off", async () => {
+    const administrator = await setUp();
+    const member = await joinAsGrace();
+    await turnMemberful(administrator, true);
+    await connectGrace(member);
+    await turnMemberful(administrator, false);
+    expect(await offersMemberful()).toBe(true);
+
+    expect((await saveProfile(member, { password: "a new password", currentPassword: grace.password })).status).toBe(200);
+    expect(await offersMemberful()).toBe(false);
+    // And a Workspace started afresh agrees.
+    await evictDurableObject(workspaceStub());
+    expect(await offersMemberful()).toBe(false);
+  });
+});
+
+describe("Disconnect Memberful", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("disconnects your account once your password checks out, ending your other sessions but this browser's", async () => {
+    const { member } = await setUpWithGrace();
+    await connectGrace(member);
+    // Signed in with Memberful on another device, with a push subscription on each.
+    const other = await memberfulSession("203.0.113.40");
+    expect(other.user.id).toBe(member.user.id);
+    await subscribe(member, "desk");
+    await subscribe(other, "phone");
+    const othersWorkspace = await openWorkspaceSocket(other);
+    const yourWorkspace = await openWorkspaceSocket(member);
+
+    const disconnected = await disconnect(member, { currentPassword: grace.password, pushSubscriptionEndpoint: endpointOf("desk") });
+    expect(disconnected.status, await disconnected.clone().text()).toBe(200);
+    expect(disconnected.headers.get("Cache-Control")).toBe("no-store");
+    const { profile } = (await disconnected.json()) as ProfileAnswer;
+    expect(profile.memberful).toEqual({ membersOnly: true, connected: null });
+    expect(await identities()).toEqual([]);
+    expect(await othersWorkspace.closed).toMatchObject({ code: CloseCode.Reconnect, reason: "Reconnect" });
+    await vi.waitFor(async () => expect(await workspaceSql("SELECT * FROM pending_revocations")).toEqual([]), { timeout: 5_000 });
+    expect(await signsIn(other)).toBe(false);
+    expect(await signsIn(member)).toBe(true);
+    expect(await yourWorkspace.answers()).toBe(true);
+    expect(await subscriptions()).toEqual([{ user_id: member.user.id, endpoint: endpointOf("desk") }]);
+
+    // Memberful signs her in no more, until she connects an account again, which she can.
+    expect(locationOf(await signInWithMemberful())).toBe(backToSignIn("taken"));
+    const again = await disconnect(member, { currentPassword: grace.password });
+    expect(again.status).toBe(404);
+    expect(await again.json()).toEqual({ error: MEMBERFUL_NOT_CONNECTED });
+    await connectGrace(member);
+    expect((await profileOf(member)).memberful).toEqual({ membersOnly: true, connected: GRACES });
+    yourWorkspace.ws.close(1000);
+  });
+
+  it("ends the sign-in links your session showed before, as a new password does, though those it shows from then on work", async () => {
+    const { member } = await setUpWithGrace();
+    await connectGrace(member);
+    const linkIn = async (answer: Response) => ((await answer.json()) as ProfileAnswer).transferId;
+    const yourLink = async () => linkIn(await withKeys("/api/users/me/profile", { headers: as(member) }));
+    const signsInWith = async (transferId: string) => (await api("/api/session/transfers", { method: "POST", body: JSON.stringify({ transferId }) })).status === 201;
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const before = await yourLink();
+
+    // A millisecond later. One that's refused, as when the password it checked isn't hers anymore, ends none.
+    vi.setSystemTime(Date.now() + 1);
+    const credentials = await credentialsFor(member.cookie.split("=")[1]!, new Request(origin), env as unknown as Env);
+    expect(await runInDurableObject(workspaceStub(), (workspace: Workspace) => workspace.disconnectElsewhere(credentials!, SITE, "a digest from before", null))).toBe("refused");
+    expect(await signsInWith(before)).toBe(true);
+
+    const disconnected = await disconnect(member, { currentPassword: grace.password });
+    expect(disconnected.status, await disconnected.clone().text()).toBe(200);
+    expect(await signsInWith(before)).toBe(false);
+    expect(await signsInWith(await linkIn(disconnected))).toBe(true);
+    expect(await signsInWith(await yourLink())).toBe(true);
+  });
+
+  it("asks for your password, counting it against the sign-in limit", async () => {
+    const { member } = await setUpWithGrace();
+    await connectGrace(member);
+    // From an address connecting counted nothing against.
+    const from = { ip: "203.0.113.50" };
+    const without = await disconnect(member, {}, from);
+    expect(without.status).toBe(422);
+    expect(await without.json()).toEqual({ error: MEMBERFUL_DISCONNECT_PASSWORD_NEEDED });
+    const wrong = await disconnect(member, { currentPassword: "wrong" }, from);
+    expect(wrong.status).toBe(422);
+    expect(await wrong.json()).toEqual({ error: CURRENT_PASSWORD_WRONG });
+    for (let attempt = 2; attempt < 10; attempt++) expect((await disconnect(member, { currentPassword: "wrong" }, from)).status).toBe(422);
+
+    const limited = await disconnect(member, { currentPassword: grace.password }, from);
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: SIGN_IN_LIMITED });
+    expect(await identities()).toHaveLength(1);
+    expect((await disconnect(member, { currentPassword: grace.password }, { ip: "203.0.113.21" })).status).toBe(200);
+    expect(await identities()).toEqual([]);
+  });
+
+  it("asks someone with a password but no email address to add one first, since signing in with a password takes one", async () => {
+    await setUpWithMemberful({ membersOnly: false });
+    const site = fakeMemberful();
+    const session = await memberfulSessionOf({ ...katherine, id: "4243", fullName: "Dorothy Vaughan", email: null }, site);
+    // Her first, where Memberful doesn't sign her in.
+    expect((await saveProfile(session, { password: "a long enough password" }, {})).status).toBe(200);
+    const refused = await disconnect(session, { currentPassword: "a long enough password" });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toEqual({ error: MEMBERFUL_DISCONNECT_WITHOUT_EMAIL });
+    expect(await identities()).toEqual([{ issuer: SITE, subject: "4243", user_id: session.user.id }]);
+
+    expect((await saveProfile(session, { emailAddress: "dorothy@example.com", currentPassword: "a long enough password" })).status).toBe(200);
+    const disconnected = await disconnect(session, { currentPassword: "a long enough password" });
+    expect(disconnected.status, await disconnected.clone().text()).toBe(200);
+    expect(await identities()).toEqual([]);
+    expect((await signInWithPassword({ emailAddress: "dorothy@example.com", password: "a long enough password" })).status).toBe(201);
+  });
+
+  it("refuses someone without a password, whom Memberful signs in alone, until they have one to sign in with instead", async () => {
+    await setUpWithMemberful({ membersOnly: false });
+    fakeMemberful();
+    const session = await memberfulSession();
+    for (const body of [{}, { currentPassword: "a long enough password" }]) {
+      const refused = await disconnect(session, body);
+      expect(refused.status).toBe(422);
+      expect(await refused.json()).toEqual({ error: MEMBERFUL_DISCONNECT_WITHOUT_PASSWORD });
+    }
+    expect(await identities()).toHaveLength(1);
+
+    // A first password, set where Memberful doesn't sign them in, lets them disconnect it.
+    expect((await saveProfile(session, { password: "a long enough password" }, {})).status).toBe(200);
+    const disconnected = await disconnect(session, { currentPassword: "a long enough password" });
+    expect(disconnected.status).toBe(200);
+    // Nothing to show: Memberful isn't members only, and nothing is connected.
+    expect(((await disconnected.json()) as ProfileAnswer).profile.memberful).toBeNull();
+    expect(await identities()).toEqual([]);
+    expect((await signInWithPassword({ emailAddress: katherine.email, password: "a long enough password" })).status).toBe(201);
+  });
+
+  it("answers 401 without a session, 403 to a guest or a deployment without the keys, and 404 while you haven't connected one", async () => {
+    const administrator = await setUp();
+    const member = await joinAsGrace();
+    const guest = await signIn("Visitor");
+    const password = { currentPassword: grace.password };
+    expect((await disconnect(null, password)).status).toBe(401);
+    const unavailable = await disconnect(member, password, { keys: false });
+    expect(unavailable.status).toBe(403);
+    expect(await unavailable.json()).toEqual({ error: MEMBERFUL_SIGN_IN_PROBLEMS.unavailable });
+    const guests = await disconnect(guest, password);
+    expect(guests.status).toBe(403);
+    expect(await guests.json()).toEqual({ error: "Guests can't disconnect Memberful" });
+    for (const membersOnly of [null, false, true]) {
+      if (membersOnly !== null) await turnMemberful(administrator, true, { membersOnly });
+      const nothing = await disconnect(member, password);
+      expect(nothing.status).toBe(404);
+      expect(await nothing.json()).toEqual({ error: MEMBERFUL_NOT_CONNECTED });
+    }
+    const bad = await disconnect(member, { currentPassword: 42 } as unknown as MemberfulDisconnection);
+    expect(bad.status).toBe(422);
+    expect(await bad.json()).toEqual({ error: "Current password must be text" });
+  });
+
+  it("changes nothing once the password it checked isn't yours anymore", async () => {
+    const { member } = await setUpWithGrace();
+    await connectGrace(member);
+    const other = await memberfulSession("203.0.113.40");
+    const credentials = await credentialsFor(member.cookie.split("=")[1]!, new Request(origin), env as unknown as Env);
+    // As when a reset lands between the check and the change.
+    const refused = await runInDurableObject(workspaceStub(), (workspace: Workspace) => workspace.disconnectElsewhere(credentials!, SITE, "a digest from before", null));
+    expect(refused).toBe("refused");
+    expect(await identities()).toHaveLength(1);
+    expect(await signsIn(other)).toBe(true);
+    expect(await signsIn(member)).toBe(true);
   });
 });

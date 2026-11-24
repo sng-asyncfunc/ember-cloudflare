@@ -1,6 +1,6 @@
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { unfurl } from "../src/unfurl";
+import { isOnHost, unfurl } from "../src/unfurl";
 import { MAX_BODY_SIZE, USER_AGENT, type Network } from "../src/unfurl/fetch";
 import { api, origin, signIn } from "./support";
 
@@ -89,6 +89,16 @@ describe("Link preview lookup", () => {
       expect((await unfurlRequest(url, cookie)).status, url).toBe(204);
     }
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("knows a link on one of Ember's hosts, at any port, as @ember's answers leave its preview out", () => {
+    const hosts = ["chat.example.com", "ember.example.workers.dev", "localhost:8787"];
+    for (const url of ["https://chat.example.com/rooms/1", "HTTPS://Chat.Example.com.:8443/", "https://ember.example.workers.dev/", "http://localhost/x"]) {
+      expect(isOnHost(url, hosts), url).toBe(true);
+    }
+    for (const url of ["https://example.com/", "https://chat.example.com.example.net/", "https://example.net/chat.example.com", "https://localhost.example/"]) {
+      expect(isOnHost(url, hosts), url).toBe(false);
+    }
   });
 
   it("needs a session", async () => {

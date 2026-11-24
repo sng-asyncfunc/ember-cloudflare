@@ -3,13 +3,16 @@ import {
   LOGO_PATH,
   MEMBERFUL_CONNECTIONS_PATH,
   roomSocketQuery,
+  searchQuery,
   WORKSPACE_PRELOADS,
+  workspaceSocketQuery,
   type Account,
   type AccountChanges,
-  type AnswerLevelChanges,
-  type AnswerLevelsAnswer,
+  type AccountDeletion,
   type AssistantChanged,
+  type AssistantChanges,
   type AssistantForgotten,
+  type AssistantKeys,
   type AssistantSaved,
   type AssistantSetup,
   type Bootstrap,
@@ -18,6 +21,7 @@ import {
   type BotChanges,
   type Bots,
   type BotSettings,
+  type ChangedBlocks,
   type ChangedPerson,
   type CustomDomainCheck,
   type CustomDomainLookup,
@@ -32,6 +36,14 @@ import {
   type EmailLinkSignUp,
   type EmailSettings,
   type Favorites,
+  type HuddleRelaySetup,
+  type HuddleSoundChanges,
+  type HuddleSounds,
+  type HuddleSoundsChanged,
+  type HuddlesForgotten,
+  type HuddlesSaved,
+  type HuddlesSettings,
+  type HuddlesSetup,
   type InvitationOutcome,
   type Invited,
   type Involvement,
@@ -40,13 +52,22 @@ import {
   type Me,
   type MemberfulConnection,
   type MemberfulConnectionStart,
+  type MemberfulDisconnection,
+  type MembersChange,
+  type NewAssistantModel,
+  type OfferedModels,
   type NewDirect,
   type NewJoinCode,
   type NewRoom,
   type NewRoomForm,
   type NewBot,
   type NewWorkspace,
+  type NotificationsPause,
+  type NotificationsPaused,
+  type NotifiedCounts,
   type OpenSignUp,
+  type PastHuddle,
+  type PastHuddles,
   type PasswordResetDone,
   type PasswordResetRequest,
   type PasswordResetWithCode,
@@ -63,12 +84,18 @@ import {
   type Room,
   type RoomChanges,
   type RoomId,
+  type RoomLayout,
   type RoomSettings,
   type RoomSocketParams,
   type SavedPushSubscription,
+  type SavedRoomLayout,
+  type Search,
   type SearchResults,
+  type SearchSort,
   type SendingDomainCheck,
   type SentTestEmail,
+  type Section,
+  type SectionId,
   type SharedRoom,
   type Sidebar,
   type SignOut,
@@ -77,8 +104,49 @@ import {
   type TurnstileKeysChange,
   type TurnstileSettings,
   type UserId,
+  type WebSearchChanged,
   type WorkspaceSettings,
+  type WorkspaceSocketParams,
+  type YourAssistantChanged,
+  type YourAssistantChanges,
 } from "@ember/protocol";
+import type { Agent, AgentAnswer, AgentChanges, Agents, AgentSettings, AgentTrial, AgentTrialAnswer, AvailableAgent, AvailableAgents, NewAgent } from "@ember/protocol/agents";
+import type {
+  AgentToolPicks,
+  AgentTools,
+  App,
+  AppAnswer,
+  AppChanges,
+  AppClient,
+  AppId,
+  AppRemoved,
+  Apps,
+  AppSignedIn,
+  AppSignInBegun,
+  AppSignInReturn,
+  AppSummary,
+  NewApp,
+  NewAppSignIn,
+  OfferedApp,
+  ToolPick,
+  YourAppSignedIn,
+  YourAppSignedOut,
+} from "@ember/protocol/apps";
+import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
+import type { OutsideAiSettings, OutsideAnswer, OutsideAnswered, OutsideAsk, OutsideAsked, OutsideScope, YourOutsideAi } from "@ember/protocol/outside";
+import type { HandledReports, NewReport, Report, ReportHandling, ReportOutcome, Reports } from "@ember/protocol/reports";
+import {
+  SSO_CONNECTIONS_PATH,
+  SSO_SETTINGS_PATH,
+  type ElsewhereConnection,
+  type SsoConnection,
+  type SsoConnectionStart,
+  type SsoDisconnection,
+  type SsoForgotten,
+  type SsoSaved,
+  type SsoSettings,
+  type SsoSetup,
+} from "@ember/protocol/sso";
 import type { LogoVariants } from "@/lib/previews";
 
 // The session lives in an HttpOnly cookie, which the browser sends with every request and socket,
@@ -94,6 +162,10 @@ export class ApiError extends Error {
     readonly field?: string,
     /** The page to go to instead, when the server names one. */
     readonly redirect?: string,
+    /** Whether an app's server refused for want of a sign-in, which Ember can begin. */
+    readonly signIn?: boolean,
+    /** Whether an app's sign-in wants a client ID that Ember can't get itself, which the app's form then asks for. */
+    readonly client?: boolean,
   ) {
     super(message);
   }
@@ -104,8 +176,10 @@ export const isSignedOut = (error: unknown) => error instanceof ApiError && erro
 
 /** What an answer carries, or the ApiError it says why it failed with. */
 async function dataOf<T>(response: Response): Promise<T> {
-  const data = (await response.json().catch(() => ({}))) as T & { error?: string; field?: string; redirect?: string };
-  if (!response.ok) throw new ApiError(response.status, data.error ?? `Request failed (${response.status})`, data.field, data.redirect);
+  const data = (await response.json().catch(() => ({}))) as T & { error?: string; field?: string; redirect?: string; signIn?: unknown; client?: unknown };
+  if (!response.ok) {
+    throw new ApiError(response.status, data.error ?? `Request failed (${response.status})`, data.field, data.redirect, data.signIn === true || undefined, data.client === true || undefined);
+  }
   return data;
 }
 
@@ -122,8 +196,8 @@ export interface ChosenPhoto {
   variant: Blob | null;
 }
 
-/** The fields of a form that can bring a photo with them: a sign-up form's, or a bot form's. */
-type UserFields = SignUp | EmailLinkSignUp | NewBot | BotChanges;
+/** The fields of a form that can bring a photo with them: a sign-up form's, a bot form's, or an agent's page's. */
+type UserFields = SignUp | EmailLinkSignUp | NewBot | BotChanges | NewAgent | AgentChanges;
 
 /**
  * A form bringing `photo` as its `avatar` and `variant`, as the Worker reads one, and with `fields` as
@@ -137,7 +211,7 @@ function photoForm({ file, variant }: ChosenPhoto, fields?: UserFields): FormDat
   return form;
 }
 
-/** What a sign-up or bot form sends: its fields as JSON, or with the photo chosen, a form. */
+/** What a sign-up form, a bot form or an agent's page sends: its fields as JSON, or with the photo chosen, a form. */
 const userBody = (fields: UserFields, photo: ChosenPhoto | null) => (photo ? photoForm(photo, fields) : JSON.stringify(fields));
 
 /** Whether Ember is set up yet, and who this browser is signed in as. */
@@ -156,12 +230,26 @@ export function dropWorkspacePreloads(): void {
 }
 
 /**
- * Sets up the workspace with its first administrator, with the photo they chose, if any, and signs this
- * browser in as them. A photo that's refused fails with an ApiError for the `avatar` field.
+ * The setup password, or the setup link's token, as a bearer token: percent-encoded, since a header can't
+ * hold every character a password can.
  */
-export async function setUpWorkspace(administrator: SignUp, photo: ChosenPhoto | null = null, setupToken: string | null = null): Promise<NewWorkspace> {
-  // The setup link's token goes as a bearer token.
-  const headers = setupToken === null ? undefined : { Authorization: `Bearer ${setupToken}` };
+const setupAuthorization = (secret: string) => ({ Authorization: `Bearer ${encodeURIComponent(secret)}` });
+
+/**
+ * Checks the setup password typed into Set up Ember before the rest of its form is filled in, failing
+ * with an ApiError that says why the Worker refuses it.
+ */
+export async function checkSetupPassword(password: string): Promise<void> {
+  await request<unknown>("/api/first_run/check", { method: "POST", headers: setupAuthorization(password) });
+}
+
+/**
+ * Sets up the workspace with its first administrator, with the photo they chose, if any, and signs this
+ * browser in as them, with the setup password or link's token where the deployment takes one. A photo
+ * that's refused fails with an ApiError for the `avatar` field.
+ */
+export async function setUpWorkspace(administrator: SignUp, photo: ChosenPhoto | null = null, setupSecret: string | null = null): Promise<NewWorkspace> {
+  const headers = setupSecret === null ? undefined : setupAuthorization(setupSecret);
   return request<NewWorkspace>("/api/first_run", { method: "POST", headers, body: userBody(administrator, photo) });
 }
 
@@ -234,12 +322,12 @@ export async function resetPasswordWithCode(reset: PasswordResetWithCode): Promi
 
 /**
  * Signs in with an email address and password: who signed in, or, for a member whose password checks out
- * while Memberful is members only, until they've connected their Memberful account, where to connect it,
- * which signs them in and opens the page `credentials.returnTo` names.
+ * while Memberful is members only, or single sign-on the only way in, until they've connected their
+ * account there, where to connect it, at either while both are, which signs them in and opens the page `credentials.returnTo` names.
  */
-export async function signIn(credentials: PasswordSignIn): Promise<Me | MemberfulConnection> {
-  const answer = await request<{ user: Me } | MemberfulConnection>("/api/session", { method: "POST", body: JSON.stringify(credentials) });
-  return "memberfulConnection" in answer ? answer : answer.user;
+export async function signIn(credentials: PasswordSignIn): Promise<Me | ElsewhereConnection> {
+  const answer = await request<{ user: Me } | ElsewhereConnection>("/api/session", { method: "POST", body: JSON.stringify(credentials) });
+  return "user" in answer ? answer.user : answer;
 }
 
 /** Signs in with just a name, as someone new. */
@@ -255,6 +343,15 @@ export async function signInAsGuest(name: string): Promise<Me> {
 export async function signInWithLink(transferId: string): Promise<Me> {
   const body: LinkSignIn = { transferId };
   return (await request<{ user: Me }>("/api/session/transfers", { method: "POST", body: JSON.stringify(body) })).user;
+}
+
+/**
+ * Deletes your account, as Delete my account on your profile does, saying you mean it with your password
+ * while you have one, or else your name, and signs this browser out. Fails with a 409 ApiError for the
+ * only administrator, a 422 when what's typed isn't yours, and a 429 past sign-in's limit.
+ */
+export async function deleteAccount(deletion: AccountDeletion): Promise<void> {
+  await request("/api/users/me", { method: "DELETE", body: JSON.stringify(deletion) });
 }
 
 /**
@@ -319,6 +416,34 @@ export async function connectMemberful(currentPassword?: string): Promise<Member
 }
 
 /**
+ * Disconnects your account from your Memberful account, with your password, ending your other sessions
+ * but keeping this browser's push subscription, as a new password does, and answers your profile as it
+ * is then, with a new sign-in link. Fails with a 422 ApiError without your password, or with one that
+ * isn't yours, or while you have no password, and a 404 once it's disconnected.
+ */
+export async function disconnectMemberful(disconnection: MemberfulDisconnection): Promise<ProfileAnswer> {
+  return request<ProfileAnswer>(MEMBERFUL_CONNECTIONS_PATH, { method: "DELETE", body: JSON.stringify(disconnection) });
+}
+
+/**
+ * Starts connecting your account to an account at the single sign-on provider, with your password while
+ * you have one: where to sign in there, which sends the browser back to your profile. Fails with a 422
+ * ApiError without your password, or with one that isn't yours, and a 409 once you've connected one.
+ */
+export async function connectSso(currentPassword?: string): Promise<SsoConnection> {
+  const start: SsoConnectionStart = currentPassword === undefined ? {} : { currentPassword };
+  return request<SsoConnection>(SSO_CONNECTIONS_PATH, { method: "POST", body: JSON.stringify(start) });
+}
+
+/**
+ * Disconnects your account from your account at the single sign-on provider, with your password, as
+ * `disconnectMemberful` disconnects Memberful's.
+ */
+export async function disconnectSso(disconnection: SsoDisconnection): Promise<ProfileAnswer> {
+  return request<ProfileAnswer>(SSO_CONNECTIONS_PATH, { method: "DELETE", body: JSON.stringify(disconnection) });
+}
+
+/**
  * Changes your profile, answering it as it is then, with a new sign-in link. A blank password keeps the
  * one you have. Fails with a 422 ApiError for an email address someone else has.
  */
@@ -361,10 +486,16 @@ export async function lookUpCustomDomain(domain: string): Promise<CustomDomainLo
 
 /**
  * The release this Ember is, and the newest one GitHub names, as General settings says, null when GitHub
- * didn't name one. Fails with a 403 ApiError for anyone but an administrator.
+ * didn't name one, as GitHub last told the Worker, which asks it again every six hours. Fails with a 403
+ * ApiError for anyone but an administrator.
  */
 export async function checkForRelease(): Promise<ReleaseCheck> {
   return request<ReleaseCheck>("/api/account/release");
+}
+
+/** The same, once the Worker has asked GitHub again, as opening Admin has it do, unless it asked in the last minute. */
+export async function checkForReleaseAfresh(): Promise<ReleaseCheck> {
+  return request<ReleaseCheck>("/api/account/release_checks", { method: "POST" });
 }
 
 /** A logo chosen for the workspace, with the variants made of it, or null where none could be made (`logoVariantsOf`). */
@@ -494,6 +625,75 @@ export async function forgetTurnstileKeys(): Promise<TurnstileSettings["turnstil
 }
 
 /**
+ * Gives Ember a Memberful site's address and keys, as Set up Memberful does, answering Memberful as
+ * Membership's card shows it then. Fails with a 422 ApiError on the field Ember or Memberful refuses, a
+ * 502 one when Ember couldn't ask Memberful, and a 403 one for anyone but an administrator.
+ */
+export async function saveMemberfulKeys(keys: MemberfulKeysChange): Promise<MemberfulSaved> {
+  return request<MemberfulSaved>("/api/account/memberful_keys", { method: "PUT", body: JSON.stringify(keys) });
+}
+
+/**
+ * Gives Ember a Realtime SFU app's ID and secret to run huddles through, answering huddles as they are
+ * then. Fails with a 422 ApiError on the field Ember or Cloudflare refuses, a 502 one when Ember couldn't
+ * ask Cloudflare, and a 403 one for anyone but an administrator.
+ */
+export async function saveHuddles(setup: HuddlesSetup): Promise<HuddlesSettings> {
+  return (await request<HuddlesSaved>("/api/account/huddles", { method: "PUT", body: JSON.stringify(setup) })).huddles;
+}
+
+/** Turns huddles off, forgetting the SFU app's keys Ember was given. Fails with a 403 ApiError for anyone but an administrator. */
+export async function forgetHuddles(): Promise<null> {
+  return (await request<HuddlesForgotten>("/api/account/huddles", { method: "DELETE" })).huddles;
+}
+
+/**
+ * Gives Ember the single sign-on provider's issuer and the keys of the app registered there, answering
+ * the provider as it is then. Fails with a 422 ApiError on the field Ember refuses, or the provider's
+ * discovery document does, and a 403 one for anyone but an administrator.
+ */
+export async function saveSso(setup: SsoSetup): Promise<SsoSettings> {
+  return (await request<SsoSaved>(SSO_SETTINGS_PATH, { method: "PUT", body: JSON.stringify(setup) })).sso;
+}
+
+/**
+ * Forgets the provider an administrator gave, which turns single sign-on off, answering the provider as
+ * the deployment's secrets give it, if they do. Fails with a 403 ApiError for anyone but an administrator.
+ */
+export async function forgetSso(): Promise<SsoSettings | null> {
+  return (await request<SsoForgotten>(SSO_SETTINGS_PATH, { method: "DELETE" })).sso;
+}
+
+/**
+ * Gives Ember a TURN key's ID and API token for huddles' relay to go by, answering huddles as they are
+ * then. Fails with a 422 ApiError on the field Ember or Cloudflare refuses, a 502 one when Ember couldn't
+ * ask Cloudflare, a 409 one while huddles are off, and a 403 one for anyone but an administrator.
+ */
+export async function saveHuddleRelay(setup: HuddleRelaySetup): Promise<HuddlesSettings> {
+  return (await request<HuddlesSaved>("/api/account/huddles/relay", { method: "PUT", body: JSON.stringify(setup) })).huddles;
+}
+
+/**
+ * Takes huddles' relay away, forgetting the TURN key Ember was given, answering huddles as they are
+ * then, which is null where they've been turned off since. Fails with a 403 ApiError for anyone but an
+ * administrator.
+ */
+export async function forgetHuddleRelay(): Promise<HuddlesSettings | null> {
+  return (await request<HuddlesSaved | HuddlesForgotten>("/api/account/huddles/relay", { method: "DELETE" })).huddles;
+}
+
+/**
+ * The models Ember offers, as Set up Ember AI, Add a model and the agents' pages list them: those the
+ * models file lists, then Workers AI's, as Cloudflare's model search lists them for the account `keys`
+ * names, with its API token, as Set up Ember AI has them typed, or else Ember AI's, or why they aren't
+ * listed. Fails with a 422 ApiError on a field that can't be what it's for, and a 403 one for anyone but
+ * an administrator.
+ */
+export async function fetchOfferedModels(keys?: AssistantKeys): Promise<OfferedModels> {
+  return request<OfferedModels>("/api/account/assistant/offered", { method: "POST", body: JSON.stringify(keys ?? {}) });
+}
+
+/**
  * Turns Ember AI on with `setup`, or changes it, once the model has answered a test question through AI
  * Gateway, answering Ember AI as it is then and what the model said. Fails with a 422 ApiError on the
  * field AI Gateway or the Worker refuses, or with none for the credits, a 429 one while AI Gateway turns
@@ -503,22 +703,262 @@ export async function saveAssistant(setup: AssistantSetup): Promise<AssistantSav
   return request<AssistantSaved>("/api/account/assistant", { method: "PUT", body: JSON.stringify(setup) });
 }
 
+/**
+ * Adds `model` to the models people can pick, once it has answered a test question through Ember AI's
+ * account, answering Ember AI as it is then and what the model said. Fails as `saveAssistant` does, with
+ * a 422 ApiError on the model's field once people can pick as many as they can, and a 409 one while
+ * Ember AI is off, or once it was set up again while the model answered.
+ */
+export async function addAssistantModel(model: NewAssistantModel): Promise<AssistantSaved> {
+  return request<AssistantSaved>("/api/account/assistant/models", { method: "POST", body: JSON.stringify(model) });
+}
+
+/**
+ * Takes the model `model` out of those people can pick, answering Ember AI as it is then. Fails with a
+ * 409 ApiError for the one that answers everyone, or while Ember AI is off, and a 403 one for anyone but
+ * an administrator.
+ */
+export async function removeAssistantModel(model: string): Promise<AssistantChanged["assistant"]> {
+  return (await request<AssistantChanged>("/api/account/assistant/models", { method: "DELETE", body: JSON.stringify({ model }) })).assistant;
+}
+
+/**
+ * Gives @ember the avatar `photo` is, in place of Ember's flame or the one it had, answering Ember AI as
+ * it is then. Fails with a 409 ApiError while Ember AI is off, and a 403 one for anyone but an
+ * administrator.
+ */
+export async function changeAssistantAvatar(photo: ChosenPhoto): Promise<AssistantChanged["assistant"]> {
+  return (await request<AssistantChanged>("/api/account/assistant/avatar", { method: "PUT", body: photoForm(photo) })).assistant;
+}
+
+/** Takes away the avatar @ember was given, bringing back Ember's flame, answering Ember AI as it is then. Fails as `changeAssistantAvatar` does. */
+export async function removeAssistantAvatar(): Promise<AssistantChanged["assistant"]> {
+  return (await request<AssistantChanged>("/api/account/assistant/avatar", { method: "DELETE" })).assistant;
+}
+
 /** Turns Ember AI off, forgetting its API token. Fails with a 403 ApiError for anyone but an administrator. */
 export async function forgetAssistant(): Promise<null> {
   return (await request<AssistantForgotten>("/api/account/assistant", { method: "DELETE" })).assistant;
 }
 
 /**
- * Changes the most each of @ember's dials goes to for anyone's questions, answering Ember AI as it is
- * then. Fails with a 409 ApiError while it's off, and a 403 one for anyone but an administrator.
+ * Changes the most each of @ember's dials goes to for anyone's questions, or which of the models people
+ * can pick it answers everyone else with, answering Ember AI as it is then. Fails with a 409 ApiError
+ * while it's off, a 422 one for a model people can't pick, and a 403 one for anyone but an administrator.
  */
-export async function changeAssistantMost(changes: AnswerLevelChanges): Promise<AssistantChanged["assistant"]> {
+export async function changeAssistantSettings(changes: AssistantChanges): Promise<AssistantChanged["assistant"]> {
   return (await request<AssistantChanged>("/api/account/assistant", { method: "PATCH", body: JSON.stringify(changes) })).assistant;
 }
 
-/** Changes how much @ember thinks and how long it answers you, answering your levels as they are then, or null while Ember AI is off. */
-export async function changeAnswerLevels(changes: AnswerLevelChanges): Promise<AnswerLevelsAnswer["assistant"]> {
-  return (await request<AnswerLevelsAnswer>("/api/users/me/assistant", { method: "PATCH", body: JSON.stringify(changes) })).assistant;
+/**
+ * Turns Search the web on, once the model Ember AI answers everyone with has searched the web for a test
+ * question through AI Gateway, or off, answering Ember AI as it is then and, once it's on, what the model
+ * said. Fails with a 422 ApiError when AI Gateway refused the model's tools for the web, the model
+ * answered without searching or can't search, a 429 one while AI Gateway turns requests away, a 502 one
+ * when it didn't answer, a 409 one while Ember AI is off, or changed while the model searched, and a 403
+ * one for anyone but an administrator.
+ */
+export async function changeWebSearch(on: boolean): Promise<WebSearchChanged> {
+  return request<WebSearchChanged>("/api/account/assistant/web_search", { method: "PUT", body: JSON.stringify({ on }) });
+}
+
+/** The agents, by name. Fails with a 409 ApiError while Ember AI is off, and a 403 one for anyone but an administrator. */
+export async function fetchAgents(): Promise<Agent[]> {
+  return (await request<Agents>("/api/account/agents")).agents;
+}
+
+/** The AI agents this person can ask, @ember first, then by name, with what each does and the rooms it shares with them: none while Ember AI is off. */
+export async function fetchAvailableAgents(): Promise<AvailableAgent[]> {
+  return (await request<AvailableAgents>("/api/agents")).agents;
+}
+
+/** Agent `agentId`, as its page shows it. Fails as `fetchAgents` does, and with a 404 ApiError for an id that isn't an agent's. */
+export async function fetchAgent(agentId: UserId): Promise<AgentSettings> {
+  return (await request<AgentAnswer>(`/api/account/agents/${encodeURIComponent(agentId)}`)).agent;
+}
+
+/**
+ * Makes an agent, with the avatar chosen for it, if any, once its model has answered a test question
+ * through Ember AI's account, and searched the web, if it's to, answering it as its page then shows it.
+ * Fails with a 422 ApiError on the field AI Gateway or the Worker refuses, a 429 one while AI Gateway
+ * turns requests away, a 502 one when the model didn't answer, a 409 one while Ember AI is off or once
+ * there are as many agents as there can be, and a 403 one for anyone but an administrator.
+ */
+export async function createAgent(agent: NewAgent, avatar: ChosenPhoto | null = null): Promise<AgentSettings> {
+  return (await request<AgentAnswer>("/api/account/agents", { method: "POST", body: userBody(agent, avatar) })).agent;
+}
+
+/**
+ * Changes agent `agentId`, leaving what `changes` leaves out, and gives it the avatar chosen, if any,
+ * answering it as its page then shows it. Fails as `fetchAgent` does, as `createAgent` does for what's
+ * refused, and with a 409 ApiError when it was changed while its model answered.
+ */
+export async function changeAgent(agentId: UserId, changes: AgentChanges, avatar: ChosenPhoto | null = null): Promise<AgentSettings> {
+  return (await request<AgentAnswer>(`/api/account/agents/${encodeURIComponent(agentId)}`, { method: "PATCH", body: userBody(changes, avatar) })).agent;
+}
+
+/** Takes away the avatar agent `agentId` was given, answering it as its page then shows it. Fails as `fetchAgent` does. */
+export async function removeAgentAvatar(agentId: UserId): Promise<AgentSettings> {
+  return (await request<AgentAnswer>(`/api/account/agents/${encodeURIComponent(agentId)}/avatar`, { method: "DELETE" })).agent;
+}
+
+/** Deletes agent `agentId`. Fails as `fetchAgent` does. */
+export async function deleteAgent(agentId: UserId): Promise<void> {
+  await request(`/api/account/agents/${encodeURIComponent(agentId)}`, { method: "DELETE" });
+}
+
+/** The connected apps, by name. Fails with a 403 ApiError for anyone but an administrator, and a 409 while Ember AI is off. */
+export async function fetchApps(): Promise<AppSummary[]> {
+  return (await request<Apps>("/api/account/apps")).apps;
+}
+
+/** App `appId`, as its page shows it. Fails as `fetchApps` does, and with a 404 ApiError for an id that isn't a connected app's. */
+export async function fetchApp(appId: AppId): Promise<App> {
+  return (await request<AppAnswer>(`/api/account/apps/${encodeURIComponent(appId)}`)).app;
+}
+
+/**
+ * Connects an app, once Ember has read its server's tools, answering it as its page shows it. Fails as
+ * `fetchApps` does, with a 422 ApiError naming the field for what's refused, the address when its
+ * server doesn't answer as one does, and with a 409 when as many apps are connected as can be.
+ */
+export async function connectApp(app: NewApp): Promise<App> {
+  return (await request<AppAnswer>("/api/account/apps", { method: "POST", body: JSON.stringify(app) })).app;
+}
+
+/**
+ * Begins a sign-in to the server of `app`, one to connect, answering where its authorization server
+ * signs people in, to send the browser. Fails as `connectApp` does, the 422 saying why Ember can't use
+ * the sign-in its server describes, if it describes one.
+ */
+export async function beginNewAppSignIn(app: NewAppSignIn): Promise<string> {
+  return (await request<AppSignInBegun>("/api/account/app-sign-ins", { method: "POST", body: JSON.stringify(app) })).authorizationUrl;
+}
+
+/**
+ * Begins a sign-in to the server of the connected app `appId`, again or in place of its token, as
+ * `beginNewAppSignIn` does, as `client` when the app's page asks who Ember is there, and otherwise as
+ * the app last signed in. Fails as it and `fetchApp` do.
+ */
+export async function beginAppSignIn(appId: AppId, client?: AppClient): Promise<string> {
+  const body = client && { body: JSON.stringify(client) };
+  return (await request<AppSignInBegun>(`/api/account/apps/${encodeURIComponent(appId)}/sign-in`, { method: "POST", ...body })).authorizationUrl;
+}
+
+/**
+ * Finishes the sign-in an authorization server sent the browser `back` from, answering the app, connected
+ * by it or signed in to `again`, or, for a sign-in you made to a connected app yourself, the app as your
+ * profile then lists it. Fails as `fetchApps` does, and with a 422 ApiError for a sign-in that has
+ * ended, was begun by someone else, or that its server didn't finish.
+ */
+export async function finishAppSignIn(back: AppSignInReturn): Promise<AppSignedIn | YourAppSignedIn> {
+  return request<AppSignedIn | YourAppSignedIn>("/api/account/app-sign-ins/finish", { method: "POST", body: JSON.stringify(back) });
+}
+
+/** Begins a sign-in you make to the connected app `appId` yourself, answering where to send the browser. Fails with an ApiError: 404 for an app that isn't one Ember signs in to, 409 while Ember AI is off, 422 when its server has no sign-in Ember can use. */
+export async function beginOwnAppSignIn(appId: AppId): Promise<string> {
+  return (await request<AppSignInBegun>(`/api/users/me/apps/${encodeURIComponent(appId)}/sign-in`, { method: "POST" })).authorizationUrl;
+}
+
+/** Forgets the sign-in you made to the connected app `appId` yourself, answering the apps as your profile then lists them, and whether its service took the sign-in back. Fails as `beginOwnAppSignIn` does. */
+export async function signOutOfApp(appId: AppId): Promise<YourAppSignedOut> {
+  return request<YourAppSignedOut>(`/api/users/me/apps/${encodeURIComponent(appId)}/sign-in`, { method: "DELETE" });
+}
+
+/**
+ * What the page says of `ask`, an AI app's request to connect to Ember as you. Fails with a 401 ApiError
+ * once the session has ended, a 403 for someone who signed in with just a name, a 409 while outside AI
+ * is off, and a 422 for a request Ember can't answer.
+ */
+export function describeOutsideAsk(ask: OutsideAsk): Promise<OutsideAsked> {
+  return request<OutsideAsked>("/api/outside/asks", { method: "POST", body: JSON.stringify(ask) });
+}
+
+/**
+ * Answers `ask`, whether to connect its app as you, leaving out `without` of what it asks, and with
+ * `ticked` of it, which Ember gives where the page leaves its box unticked only when it's ticked,
+ * answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a
+ * 409 when you have as many connected as one may.
+ */
+export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean, without: OutsideScope[] = [], ticked: OutsideScope[] = []): Promise<string> {
+  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow, without, with: ticked } satisfies OutsideAnswer) })).redirectTo;
+}
+
+/** Ends the connection `id` of yours, answering the ones you have left. Fails with a 401 ApiError once the session has ended, a 409 while outside AI is off, and a 404 once the connection has ended. */
+export function disconnectOutside(id: string): Promise<YourOutsideAi> {
+  return request<YourOutsideAi>(`/api/users/me/outside/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** Lets AI apps connect to Ember, or stops them, which ends every connection, answering which. Fails with a 401 ApiError once the session has ended, and a 403 unless you're an administrator. */
+export function changeOutsideAi(on: boolean): Promise<OutsideAiSettings> {
+  return request<OutsideAiSettings>("/api/account/outside_ai", { method: "PUT", body: JSON.stringify({ on }) });
+}
+
+/** Changes app `appId`, leaving what `changes` leaves out, answering it as its page then shows it. Fails as `fetchApp` and `connectApp` do. */
+export async function changeApp(appId: AppId, changes: AppChanges): Promise<App> {
+  return (await request<AppAnswer>(`/api/account/apps/${encodeURIComponent(appId)}`, { method: "PATCH", body: JSON.stringify(changes) })).app;
+}
+
+/** Reads app `appId`'s tools from its server again, answering it as its page then shows it. Fails as `fetchApp` does, and with a 422 ApiError when its server doesn't answer as one does. */
+export async function readAppTools(appId: AppId): Promise<App> {
+  return (await request<AppAnswer>(`/api/account/apps/${encodeURIComponent(appId)}/tools`, { method: "POST" })).app;
+}
+
+/**
+ * Every connected app's tools as the page of `agentId`, @ember or an agent, offers them, with which it
+ * may use. Fails as `fetchApps` does, and with a 404 ApiError for an id that isn't @ember's or an agent's.
+ */
+export async function fetchAgentTools(agentId: UserId): Promise<OfferedApp[]> {
+  return (await request<AgentTools>(`/api/account/agents/${encodeURIComponent(agentId)}/tools`)).apps;
+}
+
+/**
+ * Has `tools` be every tool `agentId` may use from then on, answering what its page then offers. Fails
+ * as `fetchAgentTools` does, with a 422 ApiError for more than an agent uses, and with a 409 for a tool
+ * that isn't a connected app's any more, or that its app describes another way than when it was offered.
+ */
+export async function pickAgentTools(agentId: UserId, tools: ToolPick[]): Promise<OfferedApp[]> {
+  const picks: AgentToolPicks = { tools };
+  return (await request<AgentTools>(`/api/account/agents/${encodeURIComponent(agentId)}/tools`, { method: "PUT", body: JSON.stringify(picks) })).apps;
+}
+
+/** Disconnects app `appId`, answering whether its service took back Ember's sign-in to it, if Ember was signed in to it. Fails as `fetchApp` does. */
+export function disconnectApp(appId: AppId): Promise<Partial<AppRemoved>> {
+  return request<Partial<AppRemoved>>(`/api/account/apps/${encodeURIComponent(appId)}`, { method: "DELETE" });
+}
+
+/**
+ * Asks the agent as `trial` sets it up, saved as `agentId` or not yet, its question, answering what it
+ * said and how long its model took. Nothing is saved. Fails as `createAgent` does.
+ */
+export async function tryAgent(trial: AgentTrial, agentId: UserId | null): Promise<AgentTrialAnswer> {
+  const path = agentId === null ? "/api/account/agents/trials" : `/api/account/agents/${encodeURIComponent(agentId)}/trials`;
+  return request<AgentTrialAnswer>(path, { method: "POST", body: JSON.stringify(trial) });
+}
+
+/**
+ * Changes how much @ember thinks and how long it answers you, or the model it answers you with, answering
+ * yours as they are then, or null while Ember AI is off. Fails with a 422 ApiError for a model people
+ * can't pick.
+ */
+export async function changeYourAssistant(changes: YourAssistantChanges): Promise<YourAssistantChanged["assistant"]> {
+  return (await request<YourAssistantChanged>("/api/users/me/assistant", { method: "PATCH", body: JSON.stringify(changes) })).assistant;
+}
+
+/**
+ * Turns each of a huddle's sounds that `changes` names on or off for this person, wherever they're signed
+ * in, answering which they hear then.
+ */
+export async function changeHuddleSounds(changes: HuddleSoundChanges): Promise<HuddleSounds> {
+  return (await request<HuddleSoundsChanged>("/api/users/me/huddle-sounds", { method: "PATCH", body: JSON.stringify(changes) })).sounds;
+}
+
+/**
+ * Pauses this person's notifications until `until`, an ISO time, or resumes them with null, wherever
+ * they're signed in, answering them as the people directory lists them then.
+ */
+export async function pauseNotifications(until: string | null): Promise<DirectoryUser> {
+  return (await request<NotificationsPaused>("/api/users/me/notifications-pause", { method: "PUT", body: JSON.stringify({ until } satisfies NotificationsPause) })).user;
 }
 
 /**
@@ -571,6 +1011,41 @@ export async function unbanPerson(userId: UserId): Promise<DirectoryUser> {
   return (await request<ChangedPerson>(`/api/users/${encodeURIComponent(userId)}/ban`, { method: "DELETE" })).user;
 }
 
+/**
+ * Blocks someone, or unblocks them once `blocked` is false, answering whom you've blocked now and your
+ * level in your DM with them alone, when that hid it or showed it again.
+ */
+export async function changeBlock(userId: UserId, blocked: boolean): Promise<ChangedBlocks> {
+  return request<ChangedBlocks>(`/api/users/${encodeURIComponent(userId)}/block`, { method: blocked ? "POST" : "DELETE" });
+}
+
+/**
+ * Reports message `messageId` in room `roomId` to the workspace's administrators, as Report message does.
+ * Fails with a 404 ApiError unless you're in the room and it has the message, and a 422 for your own.
+ */
+export async function reportMessage(roomId: RoomId, messageId: string, report: NewReport): Promise<void> {
+  await request(`/api/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}/report`, { method: "POST", body: JSON.stringify(report) });
+}
+
+/** Reports someone to the workspace's administrators, for their name, picture or bio, as Report on their page does. */
+export async function reportPerson(userId: UserId, report: NewReport): Promise<void> {
+  await request(`/api/users/${encodeURIComponent(userId)}/report`, { method: "POST", body: JSON.stringify(report) });
+}
+
+/** The reports an administrator sees: the open ones, newest first, and the ones handled last. */
+export function listReports(): Promise<Reports> {
+  return request<Reports>("/api/reports");
+}
+
+/**
+ * Handles report `reportId` as `outcome` says, answering the reports that closed. Fails with a 409
+ * ApiError once another administrator has handled it, and a 422 saying why when it can't be done.
+ */
+export async function handleReport(reportId: string, outcome: ReportOutcome): Promise<Report[]> {
+  const handling: ReportHandling = { outcome };
+  return (await request<HandledReports>(`/api/reports/${encodeURIComponent(reportId)}`, { method: "POST", body: JSON.stringify(handling) })).reports;
+}
+
 /** A copy of someone's sidebar, and the ETag the server sent it with. */
 export interface SidebarCopy {
   sidebar: Sidebar;
@@ -591,6 +1066,20 @@ export async function fetchSidebar(copy: SidebarCopy | null): Promise<SidebarCop
 /** Dismisses the welcome card for this person, for good: their sidebar, on any device, has no invitation from then on. */
 export async function dismissInvitation(): Promise<void> {
   await request("/api/sidebar/invitation", { method: "DELETE" });
+}
+
+/** Stops an invitation into room `roomId`'s huddle ringing in every tab this person has open, as joining from it or declining it does. */
+export async function answerHuddleInvitation(roomId: RoomId): Promise<void> {
+  await request(`/api/rooms/${encodeURIComponent(roomId)}/huddle/invitation`, { method: "DELETE" });
+}
+
+/**
+ * The latest huddles that are over in this person's rooms and DMs, but for the ones they've hidden, the
+ * latest first, as the Huddles page lists them: those someone else joined, and those whose threads have
+ * a reply.
+ */
+export async function fetchHuddles(): Promise<PastHuddle[]> {
+  return (await request<PastHuddles>("/api/huddles")).huddles;
 }
 
 /** A copy of the people directory, and the ETag the server sent it with. */
@@ -626,9 +1115,22 @@ export async function fetchRoomSettings(roomId: RoomId): Promise<RoomSettings> {
   return request<RoomSettings>(`/api/rooms/${encodeURIComponent(roomId)}/settings`);
 }
 
+/**
+ * How many people each special mention this person may use in a room would notify there, as their
+ * composer asks before sending one. Fails with a 404 ApiError for a room this person isn't in.
+ */
+export async function fetchNotified(roomId: RoomId): Promise<NotifiedCounts> {
+  return request<NotifiedCounts>(`/api/rooms/${encodeURIComponent(roomId)}/notified`);
+}
+
 /** Changes a room, answering it as it is then. */
 export async function changeRoom(roomId: RoomId, changes: RoomChanges): Promise<SharedRoom> {
   return (await request<{ room: SharedRoom }>(`/api/rooms/${encodeURIComponent(roomId)}`, { method: "PATCH", body: JSON.stringify(changes) })).room;
+}
+
+/** Puts people in a private room, and takes people out of it, leaving everyone else as they are, answering the room. */
+export async function changeMembers(roomId: RoomId, change: MembersChange): Promise<SharedRoom> {
+  return (await request<{ room: SharedRoom }>(`/api/rooms/${encodeURIComponent(roomId)}/members`, { method: "PATCH", body: JSON.stringify(change) })).room;
 }
 
 /**
@@ -657,12 +1159,31 @@ export async function setFavoriteOrder(roomIds: RoomId[]): Promise<Favorites> {
 }
 
 /**
- * Puts the rooms in this administrator's sidebar in the shared order, in the order `roomIds` lists them,
- * answering the rooms they're in that it ranks, in its order. Fails with a 403 ApiError for anyone but
- * an administrator, and for a room outside their sidebar.
+ * Puts the rooms in this administrator's sidebar in the shared order, in the order `layout` lists them,
+ * and when it has sections, the sections in its order, each with the rooms it lists, the rest in none,
+ * answering the rooms they're in that the order ranks, in its order, and every section. Fails with a 403
+ * ApiError for anyone but an administrator, and for a room outside their sidebar.
  */
-export async function setSharedOrder(roomIds: RoomId[]): Promise<RoomId[]> {
-  return (await request<{ sharedOrder: RoomId[] }>("/api/account/room_order", { method: "PUT", body: JSON.stringify({ roomIds }) })).sharedOrder;
+export async function setSharedOrder(layout: RoomLayout): Promise<SavedRoomLayout> {
+  return request<SavedRoomLayout>("/api/account/room_order", { method: "PUT", body: JSON.stringify(layout) });
+}
+
+/**
+ * Makes a sidebar section named `name`, after the others, answering it. Fails with a 409 ApiError when
+ * a section has that name, whatever its case, and a 403 for anyone but an administrator.
+ */
+export async function createSection(name: string): Promise<Section> {
+  return (await request<{ section: Section }>("/api/account/sections", { method: "POST", body: JSON.stringify({ name }) })).section;
+}
+
+/** Renames sidebar section `id`, answering it. Fails with a 409 ApiError when another section has the name. */
+export async function renameSection(id: SectionId, name: string): Promise<Section> {
+  return (await request<{ section: Section }>(`/api/account/sections/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ name }) })).section;
+}
+
+/** Deletes sidebar section `id`, leaving its rooms in none. */
+export async function deleteSection(id: SectionId): Promise<void> {
+  await request(`/api/account/sections/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 /** Deletes a room, with its messages. */
@@ -670,23 +1191,34 @@ export async function deleteRoom(roomId: RoomId): Promise<void> {
   await request(`/api/rooms/${encodeURIComponent(roomId)}`, { method: "DELETE" });
 }
 
+/** What's asked before `leaveRoom`, by Leave on a room's settings page, and by /leave. */
+export const CONFIRM_LEAVE = "Are you sure you want to leave this room? Only someone in it who can change it can add you back.";
+
+/** Takes this person out of a private room they can't change, as Leave on its settings page does. */
+export async function leaveRoom(roomId: RoomId): Promise<void> {
+  await request(`/api/rooms/${encodeURIComponent(roomId)}/membership`, { method: "DELETE" });
+}
+
 /**
- * The preview of the page `url` goes to, for a link pasted in the composer, or null when it has none, as
+ * The preview of the page `url` goes to, for a link in the composer, or null when it has none, as
  * Campfire's unfurl_controller.js asks for it. The page has none when it answers 204.
  */
-export async function fetchLinkPreview(url: string, signal: AbortSignal): Promise<LinkPreview | null> {
+export async function fetchLinkPreview(url: string, signal?: AbortSignal): Promise<LinkPreview | null> {
   const preview = await request<Partial<LinkPreview>>("/api/unfurl", { method: "POST", body: JSON.stringify({ url }), signal });
   return preview.title && preview.url ? (preview as LinkPreview) : null;
 }
 
-/** What a search for `q` finds, as it was typed, with your recent searches; all you have of them without one. */
-export async function fetchSearch(q: string | null): Promise<SearchResults> {
-  return request<SearchResults>(q === null ? "/api/searches" : `/api/searches?q=${encodeURIComponent(q)}`);
+/**
+ * A page of what `search` finds, sorted by `sort`, from `cursor` on, as the results page asks for it, with
+ * your recent searches, which are all a search with no words or filters has.
+ */
+export async function fetchSearch(search: Search, sort: SearchSort = "newest", cursor?: number): Promise<SearchResults> {
+  return request<SearchResults>(`/api/searches?${searchQuery(search, sort, cursor)}`);
 }
 
-/** Searches for `q`, as it was typed, recording it as your newest recent search, as the search page's form does. */
-export async function recordSearch(q: string): Promise<SearchResults> {
-  return request<SearchResults>("/api/searches", { method: "POST", body: JSON.stringify({ q }) });
+/** Searches for `search`, recording it as your newest recent search, as the search box does, and answers its first page, sorted by `sort`. */
+export async function recordSearch(search: Search, sort: SearchSort = "newest"): Promise<SearchResults> {
+  return request<SearchResults>("/api/searches", { method: "POST", body: JSON.stringify({ ...search, sort }) });
 }
 
 /** Forgets your recent searches. */
@@ -695,13 +1227,18 @@ export async function clearSearches(): Promise<void> {
 }
 
 /**
- * Where a room's @ prompt asks for the people it offers: Lexxy adds what's typed after the @ as
- * `filter`, and the answer is its prompt items.
+ * Where a room's @ prompt asks for the people it offers, and with `specialMentions` the special mentions
+ * too, @here, @channel and, in an open room, @everyone, which only a room's own composer offers: Lexxy
+ * adds what's typed after the @ as `filter`, and the answer is its prompt items. Without a room, it
+ * offers everyone, and no special mentions.
  */
-export const mentionPromptSrc = (roomId: RoomId) => `/api/autocompletable/users?room_id=${encodeURIComponent(roomId)}`;
+export const mentionPromptSrc = (roomId: RoomId | null, specialMentions = false) =>
+  roomId === null
+    ? "/api/autocompletable/users"
+    : `/api/autocompletable/users?room_id=${encodeURIComponent(roomId)}${specialMentions ? "&special_mentions=1" : ""}`;
 
 /** The address of a socket at `path` on this page's host, over wss on https pages. */
-function socketUrl(path: string): string {
+export function socketUrl(path: string): string {
   const url = new URL(path, location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
@@ -710,8 +1247,8 @@ function socketUrl(path: string): string {
 /** The address of a room's socket, which tells the room what `params` says about the tab. */
 export const roomSocketUrl = (roomId: string, params: RoomSocketParams) => socketUrl(`/api/rooms/${encodeURIComponent(roomId)}/socket${roomSocketQuery(params)}`);
 
-/** The address of a tab's workspace socket, which carries what changes outside the room it shows. */
-export const workspaceSocketUrl = () => socketUrl("/api/socket");
+/** The address of a tab's workspace socket, which carries what changes outside the room it shows, and tells the Workspace what `params` says about the tab. */
+export const workspaceSocketUrl = (params: WorkspaceSocketParams) => socketUrl(`/api/socket${workspaceSocketQuery(params)}`);
 
 /** Forgets the session earlier versions of the app kept in localStorage, which nothing reads now. */
 export function forgetStoredSession(): void {

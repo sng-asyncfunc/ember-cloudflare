@@ -4,6 +4,7 @@ import { PageLink } from "@/components/page-link";
 import { PeopleContext, type People } from "@/hooks/use-directory";
 import { personPath } from "@/hooks/use-route";
 import { cn } from "@/lib/utils";
+import { isAgent } from "./agent-badge";
 
 /** How many drawings are kept: more people than a page shows at once, so a tab left open doesn't keep everyone it has shown. */
 export const DRAWINGS_KEPT = 1_000;
@@ -30,10 +31,18 @@ export const avatarUrlOf = (people: People, user: User) => people.get(user.id)?.
 /** When someone last changed, as an address of their avatar says (`?v=`), so a later address has a larger one; 0 for initials drawn in the page. */
 export const avatarVersionOf = (avatarUrl: string) => Number(new URL(avatarUrl, location.origin).searchParams.get("v"));
 
+/**
+ * Whether someone is a bot, as the people directory lists them, AI agents among them, or @ember, before
+ * the directory lists anyone. A bot's avatar is a circle wherever it shows, so bots stand apart from the
+ * people around them.
+ */
+export const isBot = (user: User, listed: DirectoryUser | undefined) => listed?.role === "bot" || isAgent(listed ?? user);
+
 interface Props {
   /** Someone, with their avatar's address where it's known, as the directory lists it. */
   user: User & Partial<Pick<DirectoryUser, "avatarUrl">>;
   className?: string;
+  /** Whether a person's avatar is a square with rounded corners, as messages show people. A bot's is a circle all the same. */
   square?: boolean;
   /** Whether the image waits until it's scrolled near, as the people lists' do. */
   lazy?: boolean;
@@ -44,14 +53,18 @@ interface Props {
 /**
  * Someone's avatar, the image the people directory gives the address of, or `user` does until the
  * directory lists them, as a bot just added, hidden from screen readers unless it has a label. Until it
- * loads, or if it can't, or neither gives one, their initials show as the Worker would draw them. A photo
- * that isn't square covers it, as Campfire's `.avatar img` does. Messages use squares with 6px corners;
- * the rail and presence use circles.
+ * loads, or if it can't, or neither gives one, their initials show as the Worker would draw them. Once a
+ * picture has loaded, nothing's drawn behind it, so one that's see-through, as a logo often is, shows
+ * what's around it there. A photo that isn't square covers it, as Campfire's `.avatar img` does. Messages
+ * show people as squares with 6px corners, and the rail and presence as circles; a bot, @ember among
+ * them, is a circle everywhere.
  */
 export function UserAvatar({ user, className, square = false, lazy = false, label }: Props) {
   const listed = useContext(PeopleContext).get(user.id);
   const served = listed?.avatarUrl ?? user.avatarUrl;
   const [failed, setFailed] = useState<string | null>(null);
+  // Whether a picture has loaded: a browser goes on showing it while the next address it's given loads.
+  const [loaded, setLoaded] = useState(false);
   // The initials of the name they have now, which may be newer than the one copied into `user`.
   const placeholder = drawn(listed ?? user);
   return (
@@ -60,9 +73,16 @@ export function UserAvatar({ user, className, square = false, lazy = false, labe
       alt={label ?? ""}
       aria-hidden={label === undefined || undefined}
       loading={lazy ? "lazy" : undefined}
+      onLoad={() => setLoaded(true)}
       onError={() => served && setFailed(served)}
-      className={cn("inline-block size-9 shrink-0 select-none bg-cover object-cover", square ? "rounded-[6px]" : "rounded-full", className)}
-      style={{ backgroundImage: `url("${placeholder}")` }}
+      className={cn(
+        "inline-block size-9 shrink-0 select-none bg-cover object-cover",
+        square ? "rounded-[6px]" : "rounded-full",
+        className,
+        // Last, so a bot's stays a circle whatever corners the place gives people's.
+        isBot(user, listed) && "rounded-full",
+      )}
+      style={loaded ? undefined : { backgroundImage: `url("${placeholder}")` }}
     />
   );
 }
@@ -91,7 +111,7 @@ interface LinkProps extends Props {
 /**
  * Someone's avatar as a link to their page, titled with their name and bio as the people directory lists
  * them now. It's Campfire's `.btn.avatar` (buttons.css): no border or padding, the avatar's corners,
- * white behind the image, which fills it, and darker under a mouse.
+ * a bot's round, white behind the image, which fills it, and darker under a mouse.
  */
 export function AvatarLink({ user, className, square = false, lazy, label, reach = "finger" }: LinkProps) {
   const listed = useContext(PeopleContext).get(user.id);
@@ -106,6 +126,7 @@ export function AvatarLink({ user, className, square = false, lazy, label, reach
         square ? "rounded-[6px]" : "rounded-full",
         TOUCH_REACH[reach],
         className,
+        isBot(user, listed) && "rounded-full",
       )}
     >
       <UserAvatar user={user} square={square} lazy={lazy} label={label} className="size-full" />

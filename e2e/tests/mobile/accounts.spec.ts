@@ -1,6 +1,10 @@
 import type { Locator, Page } from "@playwright/test";
-import type { Account, BotAnswer, Bots, BotSettings, WorkspaceServerFrame } from "@ember/protocol";
-import { fakeTurnstile, isolateRoom, listing, openRoom, signInAs, signInAsAdministrator, TURNSTILE_WIDGET, useOwnAddress, WORKSPACE_SOCKET } from "../../fixtures";
+import type { BotAnswer, Bots, BotSettings, WorkspaceSettings } from "@ember/protocol";
+import type { AgentAnswer, Agents, AgentSettings, AgentTrialAnswer } from "@ember/protocol/agents";
+import type { AgentTools } from "@ember/protocol/apps";
+import { THINKING_LEVELS, TOP_LEVELS, type AssistantSettings } from "@ember/protocol/assistant";
+import { AGENT_TEMPLATE } from "@ember/protocol/prompts";
+import { answerChanged, changeTheWorkspace, fakeTurnstile, isolateRoom, listing, openRoom, signInAs, signInAsAdministrator, TURNSTILE_WIDGET, useOwnAddress, type Passes } from "../../fixtures";
 import { auditScreen, settle } from "./audits";
 import { expect, hasDrawerLayout, SWITCHES, test } from "./fixtures";
 
@@ -8,32 +12,6 @@ import { expect, hasDrawerLayout, SWITCHES, test } from "./fixtures";
 const LONG_NAME = "The-Analytical-Engine-Appreciation-Society-of-Greater-Marylebone-and-the-Surrounding-Districts";
 /** A tagline as long as the server takes, in everyday words. */
 const LONGEST_TAGLINE = "Engines and tea for every soul";
-
-/** Which of the workspace socket's frames reach the page. */
-type Passes = (frame: WorkspaceServerFrame) => boolean;
-
-/**
- * Shows `page` the workspace as `change` makes it wherever the server says what it is, its socket's
- * welcome included, without changing the test server's, which every other test shows. Its socket takes
- * over from any the page routed before, such as `isolateRoom`'s, so it passes on just what `passes` does.
- */
-async function changeTheWorkspace(page: Page, change: (account: Account) => Account, passes: Passes = () => true): Promise<void> {
-  const changed = <T extends { account: Account }>(body: T): T => ({ ...body, account: change(body.account) });
-  for (const path of ["**/api/bootstrap", "**/api/account"]) {
-    await page.route(path, async (route) => {
-      const response = await route.fetch();
-      if (!response.ok()) return route.fulfill({ response });
-      await route.fulfill({ response, json: changed(await response.json()) });
-    });
-  }
-  await page.routeWebSocket(WORKSPACE_SOCKET, (ws) => {
-    const server = ws.connectToServer();
-    server.onMessage((message) => {
-      const frame = JSON.parse(String(message));
-      if (passes(frame)) ws.send(JSON.stringify("account" in frame ? changed(frame) : frame));
-    });
-  });
-}
 
 const nameTheWorkspaceLong = (page: Page) => changeTheWorkspace(page, (account) => ({ ...account, name: LONG_NAME }));
 const showTranslationButtons = (page: Page, passes?: Passes) => changeTheWorkspace(page, (account) => ({ ...account, hideTranslationButtons: false }), passes);
@@ -94,6 +72,68 @@ test("an administrator's Set up Turnstile, with the widget's check, fits the pho
   await setup.getByRole("button", { name: "Continue" }).tap();
   const check = page.getByRole("dialog", { name: "Pass the widget's check" });
   await expect(check.frameLocator("iframe[title=\"Turnstile's check\"]").getByRole("button", { name: "Verify you are human" })).toBeVisible();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+});
+
+test("an administrator's Huddles tab and Set up huddles, with a key refused, fit the phone", async ({ page, screenIsFine }) => {
+  await useOwnAddress(page);
+  await page.goto("/account/edit#huddles-settings");
+  await signInAsAdministrator(page);
+  const card = page.getByRole("region", { name: "Audio and video chat", exact: true });
+  await expect(card.getByRole("switch", { name: "Audio and video chat" })).toBeInViewport();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  await card.getByRole("switch", { name: "Audio and video chat" }).tap();
+  const setup = page.getByRole("dialog", { name: "Set up huddles" });
+  await expect(setup.getByRole("list", { name: "Steps to set up huddles" })).toBeVisible();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // Keys that can't be an app's are refused on their field, before Cloudflare is asked anything.
+  await setup.getByRole("textbox", { name: "App ID" }).fill("my huddles app");
+  await setup.getByRole("textbox", { name: "App Secret" }).fill("f".repeat(64));
+  await setup.getByRole("button", { name: "Save" }).tap();
+  await expect(setup.getByRole("alert")).toBeVisible();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+});
+
+test("an administrator's Huddles tab, naming the app huddles run through, its card of Cameras and Screen sharing under that, and the relay's, with Set up the relay and a key refused, fit the phone", async ({ page, screenIsFine }) => {
+  await useOwnAddress(page);
+  // The settings as they are once an app's keys are given, and a TURN key's, without giving the test server any, which every other test shows.
+  const relayKeyId = "7e1a".repeat(8);
+  await page.route("**/api/account", (route) => answerChanged<WorkspaceSettings>(route, (settings) => ({ ...settings, huddles: { appId: "ca11".repeat(8), relayKeyId } })));
+  await page.goto("/account/edit#huddles-settings");
+  await signInAsAdministrator(page);
+  const card = page.getByRole("region", { name: "Audio and video chat", exact: true });
+  await card.getByRole("button", { name: "Change keys" }).scrollIntoViewIfNeeded();
+  await expect(card.getByRole("switch", { name: "Audio and video chat" })).toBeChecked();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // What people may do in a huddle comes with huddles: turn their camera on and share their screen, which are both on.
+  const cameras = page.getByRole("region", { name: "Cameras", exact: true });
+  const screens = page.getByRole("region", { name: "Screen sharing", exact: true });
+  await screens.getByRole("switch", { name: "Screen sharing" }).scrollIntoViewIfNeeded();
+  await expect(cameras.getByRole("switch", { name: "Cameras" })).toBeChecked();
+  await expect(cameras).toContainText("People can turn their camera on in a huddle.");
+  await expect(screens.getByRole("switch", { name: "Screen sharing" })).toBeChecked();
+  await expect(screens).toContainText("People can share their screen in a huddle, from a computer.");
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // Under them, the relay's card names the TURN key it goes by.
+  const relay = page.getByRole("region", { name: "Relay for strict networks", exact: true });
+  await relay.getByRole("button", { name: "Change key" }).scrollIntoViewIfNeeded();
+  await expect(relay.getByRole("switch", { name: "Relay for strict networks" })).toBeChecked();
+  await expect(relay).toContainText(`by the TURN key ${relayKeyId} in your Cloudflare account.`);
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // Change key opens Set up the relay, which refuses what can't be a TURN key's on its field, before Cloudflare is asked anything.
+  await relay.getByRole("button", { name: "Change key" }).tap();
+  const setup = page.getByRole("dialog", { name: "Set up the relay" });
+  await expect(setup.getByRole("list", { name: "Steps to set up the relay" })).toBeVisible();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  await setup.getByRole("textbox", { name: "TURN Token ID" }).fill("my TURN key");
+  await setup.getByRole("textbox", { name: "API Token" }).fill("f".repeat(64));
+  await setup.getByRole("button", { name: "Save" }).tap();
+  await expect(setup.getByRole("alert")).toBeVisible();
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
@@ -212,6 +252,7 @@ const BOT: BotSettings = {
   key: "0mgk3x2a9b4c5e-Ab3dEf5hiJ7k",
   rooms: [{ id: "0mgk3x2a9b4c5a", name: LONG_NAME }],
   webhookUrl: "https://ci.example.com/hook",
+  pickedRooms: null,
 };
 
 /** Shows `page` `BOT` as the only bot, without adding one to the test server, where it would join every other test's rooms. */
@@ -225,6 +266,11 @@ test("the Chat bots page, with a bot's commands, fits the phone", async ({ page,
   await showTheBot(page);
   await page.goto("/account/bots");
   await signInAsAdministrator(page);
+  // The bot's row, folded away, then open, with its only room open too.
+  const bot = page.getByRole("button", { name: BOT.name, exact: true });
+  await expect(bot).toBeVisible();
+  await screenIsFine();
+  await bot.click();
   await expect(page.getByRole("textbox", { name: "curl command for posting messages" })).toHaveValue(/^curl -d 'Hello!' /);
   await screenIsFine();
 });
@@ -239,6 +285,169 @@ test("a bot's settings fit the phone", async ({ page, screenIsFine }) => {
   await expect(page.getByRole("textbox", { name: "Bot name" })).toHaveValue(BOT.name);
   await expect(page.getByRole("button", { name: "Generate a new key" })).toBeVisible();
   await screenIsFine();
+  // Rooms, then Incoming, whose menu names a room as long as names go, then Outgoing, each scrolled to.
+  for (const name of ["Rooms", "Incoming", "Outgoing"]) {
+    await page.getByRole("region", { name }).scrollIntoViewIfNeeded();
+    await screenIsFine();
+  }
+});
+
+/** Ember AI on Claude Sonnet 5.5, with Ember's flame as @ember's avatar. */
+const ASSISTANT: AssistantSettings = {
+  accountId: "0123456789abcdef0123456789abcdef",
+  model: "anthropic/claude-sonnet-5.5",
+  models: [{ id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", format: "anthropic" }],
+  most: TOP_LEVELS,
+  webTools: [],
+  instructions: "",
+  promptTemplate: null,
+  avatarUrl: "/assistant-avatar.svg",
+  avatar: false,
+};
+
+/**
+ * An agent named as long as names go, saying as much as it can of what it does, kept to rooms named as
+ * long, with what Ember adds around its instructions modified, and last changed by someone named so, as
+ * the AI assistant tab lists it and its page shows it.
+ */
+const AGENT: AgentSettings = {
+  id: "0mgk3x2a9b4c60",
+  name: LONG_NAME,
+  bio: null,
+  role: "bot",
+  status: "active",
+  avatarUrl: "/assistant-avatar.svg",
+  description: "Sums up every thread into the decisions made, the questions still open and the to-dos people took on",
+  model: "anthropic/claude-sonnet-5.5",
+  modelName: "Claude Sonnet 5.5",
+  webTools: ["search", "read"],
+  access: "everyone",
+  rooms: [1, 2, 3, 4].map((n) => ({ id: `0mgk3x2a9b4c5${n}`, name: `${LONG_NAME}-${n}` })),
+  instructions: "You sum up conversations for the team.\n\nList the decisions made, then the questions still open, then the to-dos, each with who took it on.",
+  promptTemplate: `${AGENT_TEMPLATE}\n\nSign off as ${LONG_NAME}.`,
+  format: "anthropic",
+  levels: { thinking: "medium", length: "long" },
+  thinkingLevels: [...THINKING_LEVELS],
+  avatar: true,
+  changedBy: { id: "0mgk3x2a9b4c5d", name: LONG_NAME },
+  changedAt: "2026-11-09T12:00:00.000Z",
+};
+
+/** What Try it's model says. */
+const TRIED: AgentTrialAnswer = { body: `<p>Two decisions so far, and one to-do for ${LONG_NAME}.</p>`, cards: [], ms: 2345 };
+
+/** The tools an agent's page offers: an app named as long as names go, with a tool named as long as the protocol takes, one picked, which can be always allowed, one set aside, and one its app says nothing of. */
+const TOOLS: AgentTools = {
+  apps: [
+    {
+      id: "0mgk3x2a9b4c70",
+      name: LONG_NAME,
+      tools: [
+        { name: "search_issues", title: "Search issues", description: "Finds issues by their words, in every project the token can read.", fingerprint: "f-search", picked: true, changed: false, alwaysAllowed: false },
+        { name: `create_${"issue_".repeat(20)}now`, title: null, description: "Opens an issue.", fingerprint: "f-create", picked: false, changed: true, alwaysAllowed: false },
+        { name: "close_issue", title: null, description: "", fingerprint: "f-close", picked: false, changed: false, alwaysAllowed: false },
+      ],
+    },
+  ],
+};
+
+/** Shows `page` Ember AI on, with `AGENT` its only agent, without turning on the test server's, which would put @ember in every other test's rooms. */
+async function showTheAgents(page: Page): Promise<void> {
+  await page.route("**/api/account", (route) => answerChanged<WorkspaceSettings>(route, (settings) => ({ ...settings, assistant: ASSISTANT })));
+  await page.route("**/api/account/agents", (route) => route.fulfill({ json: { agents: [AGENT] } satisfies Agents }));
+  await page.route(`**/api/account/agents/${AGENT.id}`, (route) => route.fulfill({ json: { agent: AGENT } satisfies AgentAnswer }));
+  await page.route("**/api/account/agents/trials", (route) => route.fulfill({ json: TRIED }));
+  await page.route("**/api/account/agents/*/tools", (route) => route.fulfill({ json: TOOLS }));
+}
+
+/** Scrolls to each of the agent's page's cards in turn, which fit the phone. */
+/**
+ * Opens What Ember adds around the instructions and presses Modify, unless what's there is `modified`
+ * already, checking the screen at the box that asks for care, at the template and at what's under it.
+ */
+async function modifyingFits(scope: Page | Locator, screenIsFine: (options?: { denseTargets?: string[] }) => Promise<void>, modified = false) {
+  await scope.getByText("What Ember adds around them").tap();
+  const caution = scope.getByRole("region", { name: "Modify with caution" });
+  await caution.scrollIntoViewIfNeeded();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  if (!modified) await caution.getByRole("button", { name: "Modify" }).tap();
+  for (const part of [caution.getByRole("textbox", { name: "What Ember adds around them" }), caution.getByRole("button", { name: "Use Ember's own" })]) {
+    await part.scrollIntoViewIfNeeded();
+    await screenIsFine({ denseTargets: [SWITCHES] });
+  }
+}
+
+async function eachCardFits(page: Page, screenIsFine: (options?: { denseTargets?: string[] }) => Promise<void>, saved = false) {
+  for (const name of ["Instructions", "How it answers", "Search the web", "Rooms", "Try it", ...(saved ? ["Tools"] : [])]) {
+    await page.getByRole("region", { name, exact: true }).scrollIntoViewIfNeeded();
+    await screenIsFine({ denseTargets: [SWITCHES] });
+  }
+}
+
+test("an administrator's AI assistant tab, listing an agent named as long as names go, fits the phone", async ({ page, screenIsFine }) => {
+  await useOwnAddress(page);
+  await showTheAgents(page);
+  await page.goto("/account/edit#assistant-settings");
+  await signInAsAdministrator(page);
+  const edit = page.getByRole("region", { name: "Agents", exact: true }).getByRole("link", { name: `Edit ${LONG_NAME}` });
+  await expect(edit).toBeVisible();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  await edit.scrollIntoViewIfNeeded();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+});
+
+test("New agent fits the phone, card by card, with what Ember adds around the instructions, modified, and Try it's answer", async ({ page, screenIsFine }) => {
+  await useOwnAddress(page);
+  await showTheAgents(page);
+  await page.goto("/account/agents/new");
+  await signInAsAdministrator(page);
+  await expect(page.getByRole("textbox", { name: "Name" })).toBeVisible();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  await modifyingFits(page, screenIsFine);
+  await page.getByRole("radio", { name: "Only the rooms I choose" }).tap();
+  const tryIt = page.getByRole("region", { name: "Try it", exact: true });
+  await tryIt.getByRole("textbox", { name: "Question" }).fill("What did we decide?");
+  await tryIt.getByRole("button", { name: "Ask" }).tap();
+  await expect(tryIt).toContainText("Answered in 2.3 seconds.");
+  await eachCardFits(page, screenIsFine);
+  await page.getByRole("button", { name: "Create agent" }).scrollIntoViewIfNeeded();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+});
+
+test("an agent's settings fit the phone, with what Ember adds around its instructions modified, who last changed it and Delete agent", async ({ page, screenIsFine }) => {
+  await useOwnAddress(page);
+  await showTheAgents(page);
+  await page.goto("/account/edit#assistant-settings");
+  await signInAsAdministrator(page);
+  // From the tab, as the Worker answers its 404 page for an agent it doesn't have.
+  await page.getByRole("link", { name: `Edit ${LONG_NAME}` }).click();
+  await expect(page.getByRole("textbox", { name: "Name" })).toHaveValue(LONG_NAME);
+  await expect(page.getByRole("button", { name: "Remove avatar" })).toBeVisible();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  await modifyingFits(page, screenIsFine, true);
+  await eachCardFits(page, screenIsFine, true);
+  await page.getByRole("button", { name: `Delete ${LONG_NAME}` }).scrollIntoViewIfNeeded();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+});
+
+test("@ember's page fits the phone", async ({ page, screenIsFine }) => {
+  await useOwnAddress(page);
+  await showTheAgents(page);
+  await page.goto("/account/agents/ember/edit");
+  await signInAsAdministrator(page);
+  const ember = page.getByRole("region", { name: "@ember", exact: true });
+  await expect(ember.getByRole("textbox", { name: "Instructions" })).toBeVisible();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  await modifyingFits(ember, screenIsFine);
+  for (const heading of ["Instructions", "Models", "Search the web", "Limits"]) {
+    await ember.getByRole("heading", { name: heading, exact: true }).scrollIntoViewIfNeeded();
+    await screenIsFine({ denseTargets: [SWITCHES] });
+  }
+  const tools = page.getByRole("region", { name: "Tools", exact: true });
+  await expect(tools.getByRole("checkbox")).toHaveCount(4);
+  await expect(tools.getByRole("checkbox", { name: "Always allow search_issues" })).toBeVisible();
+  await tools.scrollIntoViewIfNeeded();
+  await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
 test("your profile, opened from the rail, fits the phone with Log out in the top bar and a translation button by each field", async ({ page, room, session, screenIsFine }) => {

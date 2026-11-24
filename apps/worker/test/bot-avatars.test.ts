@@ -1,9 +1,9 @@
 import type { BotAnswer, Bots, BotSettings, NewWorkspace, UserId } from "@ember/protocol";
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_BOT_AVATAR } from "../src/default-bot-avatar";
 import type { Env } from "../src/env";
-import { api, apiWith, cookieOf, freshDeploy, openWorkspaceSocket, origin, recordedImage, shown, workspaceSql, type Session } from "./support";
+import { api, apiWith, avatarVersionOf, cookieOf, freshDeploy, openWorkspaceSocket, origin, recordedImage, shown, stopTheClock, workspaceSql, type Session } from "./support";
 
 // Bots' avatars.
 
@@ -12,6 +12,10 @@ const files = (env as unknown as Env).FILES!;
 const LONG_AGO = "2026-01-01T00:00:00.000Z";
 
 beforeEach(freshDeploy);
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 const grace = { name: "Grace Hopper", emailAddress: "grace@example.com", password: "compiler design" };
@@ -56,6 +60,7 @@ async function sent(form: FormData, session: Session | null): Promise<{ body: Ar
 
 const addBot = async (session: Session | null, form: FormData) => api("/api/account/bots", { method: "POST", ...(await sent(form, session)) });
 const changeBot = async (session: Session | null, id: UserId, form: FormData) => api(`/api/account/bots/${id}`, { method: "PATCH", ...(await sent(form, session)) });
+const renameBot = (session: Session, id: UserId, name: string) => api(`/api/account/bots/${id}`, { method: "PATCH", headers: { Cookie: session.cookie }, body: JSON.stringify({ name }) });
 
 /** The bot an answer gives, once it's checked to have succeeded with `status`. */
 async function botOf(response: Response, status = 200): Promise<BotSettings> {
@@ -117,12 +122,29 @@ describe("Add and edit a bot", () => {
     await vi.waitFor(async () => expect(await storedAvatars()).toEqual([second, `${second}/512`]), { timeout: 5_000 });
   });
 
+  it("gives a bot's avatar a later address with each change, even one in the same second as the last, which nothing after takes back, as browsers keep the picture they have at one", async () => {
+    // Adding the bot, changing its avatar, renaming it and changing its avatar again, all at once.
+    stopTheClock();
+    const administrator = await setUp();
+    const added = await botOf(await addBot(administrator, botForm({ name: "Build Bot" }, null)), 201);
+    const changed = await botOf(await changeBot(administrator, added.id, botForm({})));
+    const renamed = await botOf(await renameBot(administrator, added.id, "Deploy Bot"));
+    const again = await botOf(await changeBot(administrator, added.id, botForm({})));
+
+    const pictures = [added, changed, again].map(({ avatarUrl }) => avatarVersionOf(avatarUrl));
+    expect(pictures).toEqual([...pictures].sort((a, b) => a - b));
+    expect(new Set(pictures).size).toBe(3);
+    // The same picture, at the address it had or a later one.
+    expect(avatarVersionOf(renamed.avatarUrl)).toBeGreaterThanOrEqual(avatarVersionOf(changed.avatarUrl));
+    expect(avatarVersionOf(renamed.avatarUrl)).toBeLessThan(avatarVersionOf(again.avatarUrl));
+  });
+
   it("keeps a bot's avatar through a change that brings none", async () => {
     const administrator = await setUp();
     const bot = await botOf(await addBot(administrator, botForm({ name: "Build Bot" })), 201);
     const key = await avatarKeyOf(bot.id);
 
-    const renamed = await botOf(await api(`/api/account/bots/${bot.id}`, { method: "PATCH", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ name: "Deploy Bot" }) }));
+    const renamed = await botOf(await renameBot(administrator, bot.id, "Deploy Bot"));
     expect(await botOf(await changeBot(administrator, bot.id, botForm({ webhookUrl: "https://ci.example.com/hook" }, null)))).toMatchObject({ name: "Deploy Bot" });
     expect(await avatarKeyOf(bot.id)).toBe(key);
     expect((await avatar(renamed.avatarUrl, administrator)).headers.get("Content-Type")).toBe("image/webp");
